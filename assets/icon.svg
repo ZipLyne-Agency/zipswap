@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#db2777"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="32" font-weight="600" fill="#ffffff">X</text>
+  <rect width="64" height="64" rx="14" fill="#16181B"/>
+  <rect x="14" y="14" width="36" height="36" rx="9" fill="#7CE0B5"/>
+  <g fill="none" stroke="#101113" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" transform="translate(14 14) scale(2.25)">
+    <path d="M3 5.5h9.5M10 3l2.5 2.5L10 8"/><path d="M13 10.5H3.5M6 8l-2.5 2.5L6 13"/>
+  </g>
 </svg>
