@@ -23,7 +23,7 @@ enum ShellError: LocalizedError {
     }
 }
 
-/// Runs the command line tools Swap sits on top of. A menu bar app launched by
+/// Runs the command line tools ZipSwap sits on top of. A menu bar app launched by
 /// launchd gets a bare PATH, so every lookup goes through an explicit search path.
 enum Shell {
     static let home = FileManager.default.homeDirectoryForCurrentUser

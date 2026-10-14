@@ -1,34 +1,48 @@
 #!/usr/bin/env bash
 # Builds a signed, notarized ZipSwap release and its Sparkle appcast.
-#   scripts/release.sh 1.0.1
-# Output goes to build/release/: ZipSwap-<version>.zip and appcast.xml.
-# Upload both to a GitHub release on ZipLyne-Agency/zipswap; SUFeedURL points at
-# releases/latest/download/appcast.xml. Set NOTARY_PROFILE to a notarytool
-# keychain profile to notarize; without it the zip is signed but not notarized.
+#   scripts/release.sh <version> <build-number>
+# Output goes to build/release/: ZipSwap-<version>.zip and appcast.xml, which
+# belong on the GitHub release tagged v<version>. CI (.github/workflows/release.yml)
+# runs this on every push to main; run it by hand only to test a release.
+#
+# Notarization uses, in order: an App Store Connect API key (NOTARY_KEY_PATH,
+# NOTARY_KEY_ID, NOTARY_ISSUER), a notarytool keychain profile (NOTARY_PROFILE),
+# or nothing (signed but not notarized). The appcast is signed with the EdDSA
+# key in SPARKLE_KEY_FILE, or the login Keychain item for account "zipswap".
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${1:?usage: scripts/release.sh <version>}"
-BUILD_NUMBER="$(date +%Y%m%d%H%M)"
+export MARKETING_VERSION="${1:?usage: scripts/release.sh <version> <build-number>}"
+export CURRENT_PROJECT_VERSION="${2:?usage: scripts/release.sh <version> <build-number>}"
 
-sed -i '' "s/MARKETING_VERSION: \".*\"/MARKETING_VERSION: \"$VERSION\"/; s/CURRENT_PROJECT_VERSION: \".*\"/CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"/" project.yml
 scripts/build.sh
 
 APP=build/DerivedData/Build/Products/Release/ZipSwap.app
 OUT=build/release
+rm -rf "${OUT:?}"
 mkdir -p "$OUT"
-ZIP="$OUT/ZipSwap-$VERSION.zip"
-rm -f "$ZIP"
+ZIP="$OUT/ZipSwap-$MARKETING_VERSION.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
-if [ -n "${NOTARY_PROFILE:-}" ]; then
-  xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+NOTARY_ARGS=()
+if [ -n "${NOTARY_KEY_PATH:-}" ]; then
+  NOTARY_ARGS=(--key "$NOTARY_KEY_PATH" --key-id "${NOTARY_KEY_ID:?}" --issuer "${NOTARY_ISSUER:?}")
+elif [ -n "${NOTARY_PROFILE:-}" ]; then
+  NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+fi
+if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
+  xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait --timeout 30m
   xcrun stapler staple "$APP"
   rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"
+else
+  echo "no notary credentials, the zip is signed but not notarized"
 fi
 
 SPARKLE_BIN="$(find build/DerivedData/SourcePackages/artifacts -type d -path '*Sparkle/bin' | head -1)"
-"$SPARKLE_BIN/generate_appcast" --account zipswap \
-  --download-url-prefix "https://github.com/ZipLyne-Agency/zipswap/releases/download/v$VERSION/" \
+KEY_ARGS=(--account zipswap)
+[ -n "${SPARKLE_KEY_FILE:-}" ] && KEY_ARGS=(--ed-key-file "$SPARKLE_KEY_FILE")
+"$SPARKLE_BIN/generate_appcast" "${KEY_ARGS[@]}" \
+  --download-url-prefix "https://github.com/ZipLyne-Agency/zipswap/releases/download/v$MARKETING_VERSION/" \
   "$OUT"
+grep -q 'sparkle:edSignature' "$OUT/appcast.xml" || { echo "appcast is missing its EdDSA signature"; exit 1; }
 echo "release ready in $OUT"

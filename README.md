@@ -17,21 +17,29 @@ that file into `~/.codex/auth.json`, and usage, resets and credits come from
 
 ```sh
 brew install xcodegen          # once
-scripts/build.sh --install     # builds, signs with Developer ID, installs to ~/Applications
+scripts/build.sh --install     # builds and installs to ~/Applications
 ```
+
+With the ZipLyne Developer ID in your keychain the build is signed with it;
+without it the build is signed ad hoc, which runs fine locally but can't take
+updates from the published releases.
 
 ZipSwap registers itself as a login item on first launch (turn it off in the
 panel's ⋯ menu or the dashboard).
 
 ## Updates
 
-Sparkle checks `https://github.com/ZipLyne-Agency/zipswap/releases/latest/download/appcast.xml`
-once a day. The EdDSA signing key lives in the login Keychain under the account
-`zipswap`. To ship an update:
+Every push to `main` ships an update. The `Release` workflow builds a universal
+app, signs it with the Developer ID, notarizes it, signs a Sparkle appcast, and
+publishes a GitHub release named `v1.0.<commit count>`. The app checks
+`https://github.com/ZipLyne-Agency/zipswap/releases/latest/download/appcast.xml`
+once a day, and ⋯ › Check for Updates checks on demand.
 
-```sh
-NOTARY_PROFILE=<notarytool profile> scripts/release.sh 1.0.1
-```
+The workflow reads these repository secrets: `DEVELOPER_ID_P12_BASE64`,
+`DEVELOPER_ID_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`
+(App Store Connect API key for notarization) and `SPARKLE_ED_PRIVATE_KEY`.
+`scripts/release.sh <version> <build>` runs the same steps locally.
 
-then upload `build/release/ZipSwap-1.0.1.zip` and `build/release/appcast.xml`
-to a GitHub release tagged `v1.0.1`.
+## License
+
+MIT. ZipSwap is not affiliated with Anthropic or OpenAI.

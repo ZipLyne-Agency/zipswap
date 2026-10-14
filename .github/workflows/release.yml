@@ -1,0 +1,85 @@
+# Every push to main ships an update: build, sign with the Developer ID,
+# notarize, sign the Sparkle appcast, and publish a GitHub release that
+# SUFeedURL (releases/latest/download/appcast.xml) picks up.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The commit count on main only grows, so every push gets a newer
+      # CFBundleVersion than the last and Sparkle offers it.
+      - name: Version
+        id: version
+        run: |
+          BUILD=$(git rev-list --count HEAD)
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "version=1.0.$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Signing keychain and keys
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/devid.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          EXISTING=()
+          while IFS= read -r line; do EXISTING+=("$(echo "$line" | xargs)"); done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" "${EXISTING[@]}"
+          rm -f "$RUNNER_TEMP/devid.p12"
+          printf '%s' "$ASC_PRIVATE_KEY" > "$RUNNER_TEMP/asc.p8"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
+          chmod 600 "$RUNNER_TEMP/asc.p8" "$RUNNER_TEMP/sparkle.key"
+
+      - name: Build, notarize, sign appcast
+        env:
+          NOTARY_KEY_PATH: ${{ runner.temp }}/asc.p8
+          NOTARY_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+          SPARKLE_KEY_FILE: ${{ runner.temp }}/sparkle.key
+        run: scripts/release.sh "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.build }}"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git log -1 --format='%s%n%n%b' > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" \
+            "build/release/ZipSwap-$VERSION.zip" build/release/appcast.xml \
+            --title "ZipSwap $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            --target "$GITHUB_SHA" --latest
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/asc.p8" "$RUNNER_TEMP/sparkle.key" "$RUNNER_TEMP/devid.p12"
