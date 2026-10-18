@@ -1,0 +1,4 @@
+#!/bin/sh
+# ZipSwap replaces this with the installed helper's absolute path when installing
+# the local plugin. No provider requests or UI actions happen inside a hook.
+exec "$HOME/Applications/ZipSwap.app/Contents/Helpers/ZipSwapBridge" hook

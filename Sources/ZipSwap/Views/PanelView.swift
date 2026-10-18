@@ -67,6 +67,7 @@ struct PanelView: View {
             .buttonStyle(.plain)
             .help("Change Auto-Switch in Settings")
             Spacer()
+            FooterButton(title: "Handoffs", shortcut: "") { Dashboard.shared.showHandoffs() }
             FooterButton(title: "Settings", shortcut: "⌘,") { Dashboard.shared.show() }
                 .keyboardShortcut(",")
             Menu {

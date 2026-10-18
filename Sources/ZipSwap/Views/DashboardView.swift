@@ -4,12 +4,18 @@ struct DashboardView: View {
     let model = AppModel.shared
     @State private var selection: String? = "overview"
 
+    init(initialSelection: String = "overview") {
+        _selection = State(initialValue: initialSelection)
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
             Rectangle().fill(Theme.line).frame(width: 1)
             Group {
-                if let id = selection, let account = (model.claude + model.codex).first(where: { $0.id == id }) {
+                if selection == "handoffs" {
+                    HandoffView()
+                } else if let id = selection, let account = (model.claude + model.codex).first(where: { $0.id == id }) {
                     AccountDetail(account: account)
                 } else {
                     OverviewDetail()
@@ -21,6 +27,7 @@ struct DashboardView: View {
         .preferredColorScheme(.dark)
         .frame(minWidth: 980, minHeight: 680)
         .onAppear { model.panelOpened() }
+        .onReceive(NotificationCenter.default.publisher(for: .showHandoffs)) { _ in selection = "handoffs" }
     }
 
     private var sidebar: some View {
@@ -37,6 +44,7 @@ struct DashboardView: View {
             .padding(.bottom, 14)
 
             SidebarItem(title: "Overview", systemImage: "square.grid.2x2", selected: selection == "overview") { selection = "overview" }
+            SidebarItem(title: "Handoffs", systemImage: "arrow.triangle.branch", selected: selection == "handoffs") { selection = "handoffs" }
 
             ForEach(Provider.allCases) { provider in
                 let list = provider == .claude ? model.claude : model.codex

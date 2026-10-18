@@ -130,6 +130,7 @@ final class AppModel {
         }
         lastClaudeRefresh = .now
         rebuildHistory()
+        HandoffController.shared.publishUsage()
     }
 
     func refreshCodex() async {

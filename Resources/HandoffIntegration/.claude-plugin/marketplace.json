@@ -1,0 +1,13 @@
+{
+  "name": "zipswap-local",
+  "description": "The local Claude Code integration bundled with ZipSwap.",
+  "owner": { "name": "ZipLyne" },
+  "plugins": [
+    {
+      "name": "zipswap-handoff",
+      "source": "./plugins/handoff",
+      "description": "Optional Claude usage warnings and context handoff to Codex.",
+      "version": "1.0.0"
+    }
+  ]
+}

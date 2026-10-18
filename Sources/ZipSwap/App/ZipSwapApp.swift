@@ -1,6 +1,7 @@
 import AppKit
 import Sparkle
 import SwiftUI
+import UserNotifications
 
 @main
 struct ZipSwapApp: App {
@@ -23,7 +24,12 @@ final class Dashboard: NSObject, NSWindowDelegate {
     static let shared = Dashboard()
     private var window: NSWindow?
 
-    func show() {
+    func showHandoffs() {
+        show(handoffs: true)
+        NotificationCenter.default.post(name: .showHandoffs, object: nil)
+    }
+
+    func show(handoffs: Bool = false) {
         // Dismiss the menu bar panel so it doesn't sit over the dashboard.
         for w in NSApp.windows where w !== window && w.className.contains("MenuBarExtra") { w.close() }
         if window == nil {
@@ -37,7 +43,7 @@ final class Dashboard: NSObject, NSWindowDelegate {
             w.backgroundColor = NSColor(srgbRed: 0x13 / 255, green: 0x14 / 255, blue: 0x17 / 255, alpha: 1)
             w.appearance = NSAppearance(named: .darkAqua)
             w.contentMinSize = NSSize(width: 980, height: 680)
-            w.contentViewController = NSHostingController(rootView: DashboardView())
+            w.contentViewController = NSHostingController(rootView: DashboardView(initialSelection: handoffs ? "handoffs" : "overview"))
             w.isReleasedWhenClosed = false
             w.delegate = self
             w.center()
@@ -55,11 +61,30 @@ final class Dashboard: NSObject, NSWindowDelegate {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainActor.assumeIsolated { Dashboard.shared.show() }
+        return true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Updater.shared.start()
         MainActor.assumeIsolated { AppModel.shared.start() }
+        UNUserNotificationCenter.current().delegate = self
+        MainActor.assumeIsolated { HandoffController.shared.start() }
     }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.notification.request.content.userInfo["handoffID"] is String {
+            Task { @MainActor in Dashboard.shared.showHandoffs() }
+        }
+        completionHandler()
+    }
+}
+
+extension Notification.Name {
+    static let showHandoffs = Notification.Name("ZipSwapShowHandoffs")
 }
 
 final class Updater {

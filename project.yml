@@ -18,14 +18,37 @@ settings:
     DEVELOPMENT_TEAM: DHGG5BA7J7
 
 targets:
+  ZipSwapBridge:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/HandoffCore
+      - path: Sources/ZipSwapBridge
+    settings:
+      base:
+        PRODUCT_NAME: ZipSwapBridge
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        ENABLE_HARDENED_RUNTIME: YES
+        OTHER_CODE_SIGN_FLAGS: "--timestamp"
   ZipSwap:
     type: application
     platform: macOS
     sources:
       - path: Sources/ZipSwap
+      - path: Sources/HandoffCore
       - path: Resources/Assets.xcassets
+      - path: Resources/HandoffIntegration
+        type: folder
     dependencies:
       - package: Sparkle
+      - target: ZipSwapBridge
+        link: false
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
     settings:
       base:
         PRODUCT_NAME: ZipSwap
