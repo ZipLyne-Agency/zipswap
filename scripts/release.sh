@@ -30,7 +30,17 @@ elif [ -n "${NOTARY_PROFILE:-}" ]; then
   NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
 fi
 if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
-  xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait --timeout 30m
+  xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait --timeout 30m \
+    --output-format json > "$OUT/notarization.json"
+  NOTARY_STATUS=$(plutil -extract status raw -o - "$OUT/notarization.json")
+  if [ "$NOTARY_STATUS" != "Accepted" ]; then
+    SUBMISSION_ID=$(plutil -extract id raw -o - "$OUT/notarization.json")
+    echo "Apple notarization failed: $NOTARY_STATUS (submission $SUBMISSION_ID)"
+    if xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_ARGS[@]}" "$OUT/notarization-log.json"; then
+      cat "$OUT/notarization-log.json"
+    fi
+    exit 1
+  fi
   xcrun stapler staple "$APP"
   rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"

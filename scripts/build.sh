@@ -34,6 +34,9 @@ APP=build/DerivedData/Build/Products/Release/ZipSwap.app
 # order Sparkle documents, then the app itself.
 if [ -n "$IDENTITY" ]; then
   SIGN=(codesign --force --timestamp --options runtime --sign "$IDENTITY")
+  # The embedded command-line helper needs a distribution signature with no
+  # development entitlements, just like Sparkle's nested executables.
+  "${SIGN[@]}" "$APP/Contents/Helpers/ZipSwapBridge"
   SPK="$APP/Contents/Frameworks/Sparkle.framework"
   "${SIGN[@]}" "$SPK/Versions/B/XPCServices/Installer.xpc"
   "${SIGN[@]}" --preserve-metadata=entitlements "$SPK/Versions/B/XPCServices/Downloader.xpc"
