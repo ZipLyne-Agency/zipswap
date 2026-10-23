@@ -12,7 +12,7 @@ enum Theme {
     static let text = Color(hex: 0xECEDEF)
     static let text2 = Color(hex: 0xC4C6CC)
     static let muted = Color(hex: 0x8E919A)
-    static let faint = Color(hex: 0x6E717A)
+    static let faint = Color(hex: 0x9296A1)
     static let mint = Color(hex: 0x7CE0B5)
     static let amber = Color(hex: 0xF5A524)
     static let coral = Color(hex: 0xFF6B5E)

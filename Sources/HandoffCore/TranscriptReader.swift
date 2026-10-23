@@ -12,7 +12,7 @@ public enum TranscriptReader {
     public static let maximumReadBytes = 12 * 1024 * 1024
     public static let maximumContextCharacters = 96_000
 
-    public static func read(path: String, sessionID: String) throws -> TranscriptExcerpt {
+    public static func read(path: String, sessionID: String, includeToolResults: Bool = false) throws -> TranscriptExcerpt {
         let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
         defer { try? handle.close() }
         let size = try handle.seekToEnd()
@@ -20,10 +20,10 @@ public enum TranscriptReader {
         try handle.seek(toOffset: offset)
         var data = try handle.read(upToCount: maximumReadBytes) ?? Data()
         if offset > 0, let newline = data.firstIndex(of: 10) { data.removeSubrange(...newline) }
-        return try parse(data, sessionID: sessionID, truncatedFile: offset > 0)
+        return try parse(data, sessionID: sessionID, truncatedFile: offset > 0, includeToolResults: includeToolResults)
     }
 
-    public static func parse(_ data: Data, sessionID: String, truncatedFile: Bool = false) throws -> TranscriptExcerpt {
+    public static func parse(_ data: Data, sessionID: String, truncatedFile: Bool = false, includeToolResults: Bool = true) throws -> TranscriptExcerpt {
         guard data.count <= maximumReadBytes else { throw HandoffError.invalid("Transcript input exceeds its size limit.") }
         var records: [Entry] = []
         var omitted = truncatedFile
@@ -43,7 +43,7 @@ public enum TranscriptReader {
             let compact = object["subtype"] as? String == "compact_boundary"
             var text = ""
             if ["user", "assistant"].contains(type), !isError {
-                text = visibleText(message?["content"], omitted: &omitted)
+                text = visibleText(message?["content"], omitted: &omitted, includeToolResults: includeToolResults)
             } else if type == "summary" {
                 text = object["summary"] as? String ?? ""
             }
@@ -91,7 +91,7 @@ public enum TranscriptReader {
         let compact: Bool
     }
 
-    private static func visibleText(_ content: Any?, omitted: inout Bool) -> String {
+    private static func visibleText(_ content: Any?, omitted: inout Bool, includeToolResults: Bool) -> String {
         if let text = content as? String { return text }
         guard let blocks = content as? [[String: Any]] else { return "" }
         return blocks.compactMap { block -> String? in
@@ -105,7 +105,11 @@ public enum TranscriptReader {
                 let paths = ["file_path", "path", "workdir"].compactMap { input[$0] as? String }
                 return "[Tool requested: \(name); id: \(block["id"] as? String ?? "unknown"); paths: \(paths.joined(separator: ", ")). Verify its result before repeating.]"
             case "tool_result":
-                let result = visibleText(block["content"], omitted: &omitted)
+                guard includeToolResults else {
+                    omitted = true
+                    return "[Tool result omitted. Inspect current files before repeating work.]"
+                }
+                let result = visibleText(block["content"], omitted: &omitted, includeToolResults: includeToolResults)
                 if result.count > 3000 { omitted = true }
                 return "[Tool result \(block["tool_use_id"] as? String ?? "unknown"), error=\(block["is_error"] as? Bool ?? false)]\n\(clip(result, maximum: 3000))"
             case "thinking", "redacted_thinking": return nil
@@ -129,7 +133,12 @@ public enum TranscriptReader {
 
 public enum ContextRedaction {
     public static func clean(_ text: String) -> String {
-        var result = text
+        var result = text.unicodeScalars.filter {
+            let value = $0.value
+            return (!CharacterSet.controlCharacters.contains($0) || $0 == "\n" || $0 == "\t")
+                && !(0x200B...0x200F).contains(value) && !(0x202A...0x202E).contains(value)
+                && !(0x2060...0x206F).contains(value) && value != 0xFEFF
+        }.map(String.init).joined()
         let patterns = [
             #"(?i)\b(?:sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_\-]{12,}"#,
             #"(?i)(?:Bearer\s+)[A-Za-z0-9._~+/\-=]{8,}"#,
@@ -137,6 +146,8 @@ public enum ContextRedaction {
             #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"#,
             #"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#,
             #"(?i)\b(?:postgres(?:ql)?|mysql|redis)://[^\s\"'<>]+"#,
+            #"(?i)[?&](?:token|key|secret|password|code|auth|signature|sig|access_token|refresh_token|api_key)=[^\s&#\"'<>]+"#,
+            #"(?i)\b(?:token|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token)[\"']?\s*[:=]\s*[\"']?[^\s,}\"']+"#,
         ]
         for pattern in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }

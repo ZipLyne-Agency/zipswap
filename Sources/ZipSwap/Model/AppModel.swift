@@ -17,43 +17,75 @@ final class AppModel {
     var codexLoading = false
     var busy: Set<String> = []
     var toast: String?
+    var persistentError: String?
+    let coordinator = AccountCoordinator()
     var history: [HistoryItem] = []
     var legacyRunning = false
     var flashUntil: Date?
     var lastClaudeRefresh: Date?
     var lastCodexRefresh: Date?
     var addingCodex = false
+    var runtimeTools: [RuntimeTool] = []
+    var claudeIdentityReady = false
 
     var claudeAutoOn: Bool { didSet { save("claudeAutoOn", claudeAutoOn); applyClaudeAuto() } }
-    var claudeThreshold: Double { didSet { save("claudeThreshold", claudeThreshold); scheduleThresholdSync() } }
+    private var claudeThresholdValue: Double = 95
+    var claudeThreshold: Double {
+        get { claudeThresholdValue }
+        set {
+            let value = RotationSettings.threshold(newValue, fallback: 95)
+            guard value != claudeThresholdValue else { return }
+            claudeThresholdValue = value; save("claudeThreshold", value); scheduleThresholdSync()
+        }
+    }
     var codexAutoOn: Bool { didSet { save("codexAutoOn", codexAutoOn) } }
-    var codexThreshold: Double { didSet { save("codexThreshold", codexThreshold) } }
+    private var codexThresholdValue: Double = 90
+    var codexThreshold: Double {
+        get { codexThresholdValue }
+        set {
+            let value = RotationSettings.threshold(newValue, fallback: 90)
+            guard value != codexThresholdValue else { return }
+            codexThresholdValue = value; save("codexThreshold", value)
+        }
+    }
     var launchAtLogin: Bool {
         didSet {
-            guard launchAtLogin != oldValue else { return }
+            guard launchAtLogin != oldValue, !updatingLoginItem else { return }
+            updatingLoginItem = true
+            defer { updatingLoginItem = false }
             do {
                 if launchAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             } catch {
-                show("Couldn't change login item: \(error.localizedDescription)")
+                showError("Couldn't change login item: \(error.localizedDescription)")
+            }
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+            if !launchAtLogin && SMAppService.mainApp.status == .requiresApproval {
+                showError("Approve ZipSwap in System Settings > Login Items.")
             }
         }
     }
 
-    @ObservationIgnored private var stored: [CodexStoredAccount] = []
-    @ObservationIgnored private let engine = ClaudeAutoEngine()
+    @ObservationIgnored var stored: [CodexStoredAccount] = []
+    @ObservationIgnored let engine = ClaudeAutoEngine()
     @ObservationIgnored private var timers: [Timer] = []
-    @ObservationIgnored private var thresholdTask: Task<Void, Never>?
-    @ObservationIgnored private var lastCodexAutoSwitch: Date = .distantPast
+    @ObservationIgnored var thresholdTask: Task<Void, Never>?
+    @ObservationIgnored var lastCodexAutoSwitch: Date = UserDefaults.standard.object(forKey: "lastCodexVerifiedSwitch") as? Date ?? .distantPast
+    @ObservationIgnored var codexCooldownUntil: TimeInterval = 0
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var updatingLoginItem = false
+    @ObservationIgnored private var pendingClaudeRefresh = false
+    @ObservationIgnored var codexPoll: [String: CodexPollState] = [:]
+    @ObservationIgnored var loginTask: Task<Void, Never>?
 
     private init() {
         let d = UserDefaults.standard
         d.register(defaults: ["claudeAutoOn": true, "claudeThreshold": 95.0, "codexAutoOn": true, "codexThreshold": 90.0])
         claudeAutoOn = d.bool(forKey: "claudeAutoOn")
-        claudeThreshold = d.double(forKey: "claudeThreshold")
+        claudeThresholdValue = RotationSettings.threshold(d.double(forKey: "claudeThreshold"), fallback: 95)
         codexAutoOn = d.bool(forKey: "codexAutoOn")
-        codexThreshold = d.double(forKey: "codexThreshold")
+        codexThresholdValue = RotationSettings.threshold(d.double(forKey: "codexThreshold"), fallback: 90)
         launchAtLogin = SMAppService.mainApp.status == .enabled
+        codexCooldownUntil = ProcessInfo.processInfo.systemUptime + RotationSettings.remainingCooldown(lastSwitch: lastCodexAutoSwitch, now: .now)
     }
 
     private func save(_ key: String, _ value: Any) { UserDefaults.standard.set(value, forKey: key) }
@@ -67,9 +99,13 @@ final class AppModel {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         engine.onEvent = { [weak self] event in self?.handleEngine(event) }
-        stored = CodexService.loadIndex()
+        do { stored = try CodexService.loadIndex() }
+        catch { codexError = error.localizedDescription; showError(error.localizedDescription) }
+        codexPoll = UserDefaults.standard.data(forKey: "codexPoll.v1")
+            .flatMap { try? JSONDecoder().decode([String: CodexPollState].self, from: $0) } ?? [:]
 
         Task {
+            await checkTools()
             legacyRunning = await ClaudeService.legacyMenuBarRunning()
             applyClaudeAuto()
             await refreshAll()
@@ -78,14 +114,16 @@ final class AppModel {
         timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshClaude() }
         })
-        timers.append(Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
+        timers.append(Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshCodex() }
         })
         timers.append(Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 let running = await ClaudeService.legacyMenuBarRunning()
-                if running != self.legacyRunning { self.legacyRunning = running; self.applyClaudeAuto() }
+                self.legacyRunning = running
+                self.applyClaudeAuto()
+                self.expireReadings()
             }
         })
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
@@ -96,8 +134,8 @@ final class AppModel {
     private func enableLoginItemOnFirstRun() {
         let key = "didSetUpLoginItem"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
         launchAtLogin = true
+        if launchAtLogin { UserDefaults.standard.set(true, forKey: key) }
     }
 
     /// Opening the panel refreshes anything older than a short grace period.
@@ -115,257 +153,169 @@ final class AppModel {
     }
 
     func refreshClaude() async {
-        guard !claudeLoading else { return }
+        guard !claudeLoading else { pendingClaudeRefresh = true; return }
+        guard runtimeTools.first(where: { $0.name == "claude-swap" })?.issue == nil else { return }
         guard ClaudeService.isInstalled else {
-            claudeError = "claude-swap isn't installed. Run: uv tool install claude-swap"
+            claudeError = "claude-swap isn't installed. Run: uv tool install 'claude-swap==0.28.0'"
             return
         }
         claudeLoading = true
-        defer { claudeLoading = false }
-        do {
-            claude = try await ClaudeService.list()
-            claudeError = nil
-        } catch {
-            claudeError = error.localizedDescription
+        let generation = coordinator.generation(.claude)
+        defer {
+            claudeLoading = false
+            if pendingClaudeRefresh {
+                pendingClaudeRefresh = false
+                Task { await refreshClaude() }
+            }
         }
-        lastClaudeRefresh = .now
+        do {
+            var fresh = try await ClaudeService.list()
+            if let active = fresh.first(where: \.isActive) {
+                try await ClaudeService.verifyDefaultIdentity(email: active.email, organizationID: active.organizationID)
+                fresh = fresh.map { var value = $0; value.activeIdentityVerified = value.isActive; return value }
+            }
+            guard coordinator.generation(.claude) == generation else { pendingClaudeRefresh = true; return }
+            claudeIdentityReady = fresh.contains(where: { $0.isActive && $0.activeIdentityVerified })
+            claude = fresh
+            claudeError = nil
+            lastClaudeRefresh = .now
+            Diagnostics.record(provider: .claude, operation: "refresh", outcome: "verified")
+        } catch {
+            guard coordinator.generation(.claude) == generation else { pendingClaudeRefresh = true; return }
+            claudeError = error.localizedDescription
+            claudeIdentityReady = false; engine.stop()
+            claude = claude.map { var value = $0; value.stale = true; value.activeIdentityVerified = false; return value }
+            Diagnostics.record(provider: .claude, operation: "refresh", outcome: "failed")
+        }
         rebuildHistory()
+        if !coordinator.busy(.claude) { applyClaudeAuto() }
         HandoffController.shared.publishUsage()
     }
 
     func refreshCodex() async {
         guard !codexLoading else { return }
+        guard runtimeTools.first(where: { $0.name == "codex" })?.issue == nil else { return }
         guard CodexService.isInstalled else {
             codexError = "Codex CLI isn't installed."
             return
         }
         codexLoading = true
         defer { codexLoading = false }
-        CodexService.syncLive(into: &stored)
+        let generation = coordinator.generation(.codex)
+        do { try CodexService.syncLive(into: &stored) }
+        catch {
+            codexError = error.localizedDescription
+            codex = codex.map { var value = $0; value.stale = true; return value }
+            Diagnostics.record(provider: .codex, operation: "storage", outcome: "failed")
+            return
+        }
         let liveId = CodexService.liveAccountId()
-        let accounts = stored
-        let results = await withTaskGroup(of: (Int, Account).self) { group in
-            for (index, item) in accounts.enumerated() {
-                group.addTask { (index, await CodexService.fetch(item, isActive: item.accountId == liveId)) }
+        let accounts = CodexPollPlan.select(stored, liveID: liveId, states: codexPoll, now: .now)
+        var refreshed: [Account] = []
+        for offset in stride(from: 0, to: accounts.count, by: CodexPollPlan.maximumConcurrent) {
+            let batch = Array(accounts[offset..<min(offset + CodexPollPlan.maximumConcurrent, accounts.count)])
+            let results = await withTaskGroup(of: Account.self) { group in
+                for item in batch { group.addTask { await CodexService.fetch(item, isActive: item.accountId == liveId) } }
+                var result: [Account] = []
+                for await value in group { result.append(value) }
+                return result
             }
-            var out: [(Int, Account)] = []
-            for await r in group { out.append(r) }
-            return out.sorted { $0.0 < $1.0 }.map(\.1)
+            refreshed.append(contentsOf: results)
+        }
+        guard coordinator.generation(.codex) == generation, CodexService.liveAccountId() == liveId else { return }
+        var values = Dictionary(codex.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        for account in refreshed {
+            var reading = account
+            if account.problem != nil, let previous = values[account.id], !previous.windows.isEmpty {
+                reading.windows = previous.windows; reading.fetchedAt = previous.fetchedAt; reading.stale = true
+            }
+            var state = codexPoll[account.id.replacingOccurrences(of: "codex-", with: "")] ?? CodexPollState()
+            state.record(success: account.problem == nil, now: .now, jitter: Double.random(in: 0...15))
+            if account.problem != nil { reading.usageRetryAt = state.retryAt }
+            values[account.id] = reading
+            codexPoll[account.id.replacingOccurrences(of: "codex-", with: "")] = state
+        }
+        let ids = Set(stored.map(\.id))
+        codexPoll = codexPoll.filter { ids.contains($0.key) }
+        if let data = try? JSONEncoder().encode(codexPoll) { UserDefaults.standard.set(data, forKey: "codexPoll.v1") }
+        let results = stored.map { item in
+            values["codex-\(item.id)"] ?? CodexService.parse(item, isActive: item.accountId == liveId, account: nil, limits: nil, error: "Waiting for a usage refresh")
         }
         // Learn emails and plans the first time we see them.
         var changed = false
-        for (i, acc) in results.enumerated() where i < stored.count {
+        let previous = stored
+        for (i, acc) in results.enumerated() where i < stored.count && acc.problem == nil {
             if stored[i].email.isEmpty, !acc.email.isEmpty {
                 stored[i].email = acc.email
                 if stored[i].name == "Codex" { stored[i].name = String(acc.email.split(separator: "@").first ?? "Codex") }
                 changed = true
             }
         }
-        if changed { CodexService.saveIndex(stored) }
+        if changed {
+            do { try CodexService.saveIndex(stored, replacing: previous) }
+            catch { stored = previous; codexError = error.localizedDescription; return }
+        }
         codex = results.map { acc in
             var a = acc
+            a.isActive = a.providerAccountID == liveId
             if let s = stored.first(where: { "codex-\($0.id)" == acc.id }) { a.name = s.name }
             return a
         }
-        codexError = nil
-        lastCodexRefresh = .now
+        codexError = codex.contains(where: { $0.problem != nil }) ? "Some Codex readings are unavailable. Select an account for details." : nil
+        if refreshed.contains(where: { $0.problem == nil }) { lastCodexRefresh = .now }
         rebuildHistory()
         await evaluateCodexAuto()
     }
 
     private func rebuildHistory() {
-        let names = Dictionary(uniqueKeysWithValues: claude.compactMap { a in a.slot.map { (String($0), a.name) } })
-        let claudeItems = ClaudeService.history().map {
-            HistoryItem(provider: .claude, from: names[$0.from] ?? "slot \($0.from)", to: names[$0.to] ?? "slot \($0.to)", at: $0.at, reason: $0.reason)
-        }
-        history = (claudeItems + CodexService.loadHistory()).sorted { $0.at > $1.at }.prefix(40).map { $0 }
-    }
-
-    // MARK: actions
-
-    func activate(_ account: Account) {
-        guard !busy.contains(account.id) else { return }
-        busy.insert(account.id)
-        Task {
-            defer { busy.remove(account.id) }
-            do {
-                switch account.provider {
-                case .claude:
-                    guard let slot = account.slot else { return }
-                    try await ClaudeService.switchTo(slot: slot)
-                    await refreshClaude()
-                case .codex:
-                    guard let target = storedAccount(for: account) else { return }
-                    let from = codex.first(where: \.isActive)?.name ?? "none"
-                    try CodexService.switchTo(target, accounts: stored)
-                    CodexService.appendHistory(from: from, to: target.name, reason: "manual")
-                    await refreshCodex()
-                }
-                flash()
-                show("Now using \(account.title) for \(account.provider.title)")
-            } catch {
-                show(error.localizedDescription)
-            }
-        }
-    }
-
-    func rename(_ account: Account, to name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed != account.name else { return }
-        switch account.provider {
-        case .claude:
-            guard let slot = account.slot else { return }
-            if let i = claude.firstIndex(where: { $0.id == account.id }) { claude[i].name = trimmed }
-            Task {
-                do { try await ClaudeService.rename(slot: slot, to: trimmed) } catch { show(error.localizedDescription) }
-                await refreshClaude()
-            }
-        case .codex:
-            guard !trimmed.isEmpty, let i = stored.firstIndex(where: { "codex-\($0.id)" == account.id }) else { return }
-            stored[i].name = trimmed
-            CodexService.saveIndex(stored)
-            if let j = codex.firstIndex(where: { $0.id == account.id }) { codex[j].name = trimmed }
-        }
-    }
-
-    func setInRotation(_ account: Account, _ enabled: Bool) {
-        guard let slot = account.slot else { return }
-        Task {
-            do { try await ClaudeService.setInRotation(slot: slot, enabled) } catch { show(error.localizedDescription) }
-            await refreshClaude()
-        }
-    }
-
-    func addClaudeLogin() {
-        Task {
-            do {
-                _ = try await ClaudeService.addCurrentLogin()
-                show("Added your current Claude Code login")
-                await refreshClaude()
-            } catch {
-                show(error.localizedDescription)
-            }
-        }
-    }
-
-    func addCodexAccount() {
-        guard !addingCodex else { return }
-        addingCodex = true
-        show("Finish signing in to ChatGPT in your browser")
-        Task {
-            defer { addingCodex = false }
-            do {
-                let (account, isNew) = try await CodexService.addAccount(existing: stored)
-                if isNew { stored.append(account); CodexService.saveIndex(stored) }
-                show(isNew ? "Added \(account.name)" : "\(account.name) was already saved, login refreshed")
-                await refreshCodex()
-            } catch {
-                show(error.localizedDescription)
-            }
-        }
-    }
-
-    func removeCodex(_ account: Account) {
-        guard !account.isActive, let target = storedAccount(for: account) else {
-            show("Switch away from this account before removing it")
-            return
-        }
-        CodexService.remove(target)
-        stored.removeAll { $0.id == target.id }
-        CodexService.saveIndex(stored)
-        codex.removeAll { $0.id == account.id }
-    }
-
-    func useResetCredit(_ account: Account) {
-        guard let target = storedAccount(for: account) else { return }
-        busy.insert(account.id)
-        Task {
-            defer { busy.remove(account.id) }
-            do {
-                let message = try await CodexService.useResetCredit(target, isActive: account.isActive, creditId: account.resetCredits.first?.id)
-                show(message)
-                await refreshCodex()
-            } catch {
-                show(error.localizedDescription)
-            }
-        }
-    }
-
-    func retireLegacyMenuBar() {
-        Task {
-            do {
-                try await ClaudeService.retireLegacyMenuBar()
-                legacyRunning = await ClaudeService.legacyMenuBarRunning()
-                applyClaudeAuto()
-                show("Old cswap menu bar retired, ZipSwap runs auto-switch now")
-            } catch {
-                show(error.localizedDescription)
-            }
-        }
-    }
-
-    private func storedAccount(for account: Account) -> CodexStoredAccount? {
-        stored.first { "codex-\($0.id)" == account.id }
-    }
-
-    // MARK: auto-switch
-
-    var claudeEngineRunning: Bool { engine.isRunning }
-
-    private func applyClaudeAuto() {
-        if claudeAutoOn && !legacyRunning && ClaudeService.isInstalled {
-            engine.start(threshold: Int(claudeThreshold))
-        } else {
-            engine.stop()
-        }
-    }
-
-    /// Slider drags fire constantly; persist and restart the engine once it settles.
-    private func scheduleThresholdSync() {
-        thresholdTask?.cancel()
-        let value = Int(claudeThreshold)
-        thresholdTask = Task {
-            try? await Task.sleep(for: .milliseconds(800))
-            guard !Task.isCancelled else { return }
-            try? await ClaudeService.setThreshold(value)
-            applyClaudeAuto()
-        }
-    }
-
-    private func handleEngine(_ event: ClaudeAutoEngine.Event) {
-        switch event.kind {
-        case "switch":
-            let to = (event.payload["to"] as? [String: Any])?["number"] as? Int
-            let name = claude.first { $0.slot == to }?.name ?? "another account"
-            notify("Claude switched to \(name)", body: "The active account was nearing its limit.")
-            flash()
-            Task { await refreshClaude() }
-        case "account-quarantined":
-            notify("A Claude account needs a fresh login", body: "Run /login in Claude Code, then add it again.")
-        default:
-            break
-        }
-    }
-
-    private func evaluateCodexAuto() async {
-        guard codexAutoOn, codex.count > 1, let active = codex.first(where: \.isActive) else { return }
-        guard active.isBlocked || active.tightest >= codexThreshold else { return }
-        guard Date.now.timeIntervalSince(lastCodexAutoSwitch) > 300 else { return }
-        let candidates = codex.filter { !$0.isActive && !$0.isBlocked && $0.problem == nil && $0.tightest < codexThreshold - 10 }
-        guard let best = candidates.min(by: { $0.tightest < $1.tightest }), let target = storedAccount(for: best) else { return }
-        do {
-            try CodexService.switchTo(target, accounts: stored)
-            lastCodexAutoSwitch = .now
-            CodexService.appendHistory(from: active.name, to: best.name, reason: "auto at \(Int(active.tightest))%")
-            notify("Codex switched to \(best.name)", body: "\(active.name) reached \(Int(active.tightest))%.")
-            flash()
-            await refreshCodex()
-        } catch {
-            show(error.localizedDescription)
-        }
+        let names = Dictionary(claude.compactMap { a in a.slot.map { (String($0), a.name) } }, uniquingKeysWith: { first, _ in first })
+        do { history = try SwitchJournal.load {
+            ClaudeService.history().map {
+                HistoryItem(provider: .claude, from: names[$0.from] ?? "slot \($0.from)", to: names[$0.to] ?? "slot \($0.to)", at: $0.at, reason: $0.reason)
+            } + CodexService.loadHistory()
+        }.sorted { $0.at > $1.at }.prefix(100).map { $0 } }
+        catch { showError("Switch history could not be read or saved. Account state was retained.") }
     }
 
     // MARK: feedback
+
+    func checkTools() async {
+        legacyRunning = await ClaudeService.legacyMenuBarRunning()
+        runtimeTools = await RuntimeCompatibility.check()
+        if let issue = runtimeTools.first(where: { ($0.name == "claude-swap" || $0.name == "claude") && $0.issue != nil })?.issue { claudeError = issue }
+        if let issue = runtimeTools.first(where: { $0.name == "codex" })?.issue { codexError = issue }
+        if !runtimeTools.contains(where: { ($0.name == "claude-swap" || $0.name == "claude") && $0.issue != nil }) {
+            do {
+                let token = try coordinator.begin(.claude, accountID: "default-reconciliation")
+                defer { coordinator.finish(token) }
+                try await engine.pause()
+                try await ClaudeService.reconcileDefaultLogin(); claudeIdentityReady = true
+            } catch { claudeIdentityReady = false; claudeError = error.localizedDescription }
+        } else { claudeIdentityReady = false }
+        applyClaudeAuto()
+    }
+
+    func showError(_ message: String) {
+        persistentError = ContextRedaction.clean(message)
+        show(persistentError ?? "Account operation failed")
+    }
+
+    func expireReadings() {
+        claude = claude.map { value in
+            var value = value
+            if !value.readingTrusted(at: .now) { value.stale = true }
+            return value
+        }
+        let liveID = CodexService.liveAccountId()
+        codex = codex.map { value in
+            var value = value
+            let selected = value.providerAccountID == liveID
+            if value.isActive != selected { value.activeIdentityVerified = false }
+            value.isActive = selected
+            if !value.readingTrusted(at: .now) { value.stale = true }
+            return value
+        }
+    }
 
     func show(_ message: String) {
         toast = message
@@ -375,7 +325,7 @@ final class AppModel {
         }
     }
 
-    private func flash() {
+    func flash() {
         flashUntil = .now.addingTimeInterval(4)
         Task {
             try? await Task.sleep(for: .seconds(4.2))
@@ -385,7 +335,7 @@ final class AppModel {
 
     var isFlashing: Bool { (flashUntil ?? .distantPast) > .now }
 
-    private func notify(_ title: String, body: String) {
+    func notify(_ title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -400,7 +350,7 @@ final class AppModel {
     func upNext(_ provider: Provider) -> Account? {
         let list = provider == .claude ? claude : codex
         return list
-            .filter { !$0.isActive && !$0.isBlocked && !$0.disabled && $0.problem == nil }
+            .filter { !$0.isActive && $0.eligibilityReason() == nil }
             .min { $0.tightest < $1.tightest }
     }
 

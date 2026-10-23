@@ -36,6 +36,14 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      - name: Verify account, process, handoff and timezone behavior
+        run: |
+          swift test --scratch-path "$RUNNER_TEMP/zipswap-tests"
+          TMPDIR="$RUNNER_TEMP" scripts/test-usage.sh
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          echo "ZIPSWAP_BUILD_DIR=$RUNNER_TEMP/zipswap-build" >> "$GITHUB_ENV"
+          echo "ZIPSWAP_RELEASE_DIR=$RUNNER_TEMP/zipswap-release" >> "$GITHUB_ENV"
+
       - name: Signing keychain and keys
         env:
           P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
@@ -74,7 +82,7 @@ jobs:
         run: |
           git log -1 --format='%s%n%n%b' > "$RUNNER_TEMP/notes.md"
           gh release create "v$VERSION" \
-            "build/release/ZipSwap-$VERSION.zip" build/release/appcast.xml \
+            "$ZIPSWAP_RELEASE_DIR/ZipSwap-$VERSION.zip" "$ZIPSWAP_RELEASE_DIR/appcast.xml" \
             --title "ZipSwap $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
             --target "$GITHUB_SHA" --latest
 

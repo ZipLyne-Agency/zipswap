@@ -2,6 +2,8 @@ import SwiftUI
 
 struct HandoffView: View {
     let handoff = HandoffController.shared
+    @State private var showArchived = false
+    @State private var visibleCount = 50
 
     var body: some View {
         ScrollView {
@@ -9,8 +11,6 @@ struct HandoffView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Claude to Codex").font(.system(size: 24, weight: .semibold)).foregroundStyle(Theme.text)
-                        Text("Keep the conversation moving when Claude reaches its limit.")
-                            .font(.system(size: 13)).foregroundStyle(Theme.muted)
                     }
                     Spacer()
                     Text(handoff.settings.enabled ? "ON" : "OFF")
@@ -23,7 +23,7 @@ struct HandoffView: View {
                         get: { handoff.settings.enabled }, set: handoff.setEnabled))
                         .disabled(!handoff.integrationInstalled || handoff.installing)
                         .accessibilityIdentifier("handoff-enabled")
-                    Text("Off by default. Claude account rotation gets the first chance. A confirmed rate-limit failure can then create one Codex thread with the visible conversation and current project state.")
+                    Text("Claude rotation runs first. Each workspace needs context approval before its first transfer.")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                     Divider().overlay(Theme.line)
                     HStack {
@@ -43,12 +43,24 @@ struct HandoffView: View {
                     Toggle("Open the Codex thread in Terminal automatically", isOn: Binding(
                         get: { handoff.settings.automaticallyOpen }, set: handoff.setAutomaticallyOpen))
                         .accessibilityIdentifier("handoff-auto-open")
-                    Text("Codex uses your ChatGPT sign-in. Preparing a thread makes no model call; continuing it uses your Codex allowance. Conversation excerpts are sent to Codex when you continue. Hidden reasoning, attachments, and running processes do not transfer.")
+                    Text("Preparation imports approved context without a model turn. Continuation rechecks your Codex account and included allowance; account credits may apply under provider settings.")
                         .font(.system(size: 11.5)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.switch)
                 .cardStyle()
 
+                if let workspaces = handoff.settings.approvedWorkspaces, !workspaces.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Approved workspaces").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+                        ForEach(workspaces, id: \.self) { path in
+                            HStack {
+                                Text(path).font(Theme.mono(11)).foregroundStyle(Theme.text2).textSelection(.enabled)
+                                Spacer()
+                                Button("Revoke") { handoff.revokeWorkspace(path) }.controlSize(.small)
+                            }
+                        }
+                    }.cardStyle()
+                }
                 if let message = handoff.message {
                     Text(message).font(.system(size: 12)).foregroundStyle(Theme.amber)
                         .textSelection(.enabled).accessibilityIdentifier("handoff-message")
@@ -60,28 +72,41 @@ struct HandoffView: View {
                     if handoff.preparing { ProgressView().controlSize(.small) }
                     Button("Refresh") { handoff.refreshRecords(); handoff.inspectIntegration() }.controlSize(.small)
                 }
-                if handoff.records.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Your continued threads will appear here.").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
-                        Text("Every handoff keeps its Claude session ID and Codex thread ID. Use Open Codex Thread to return to that exact conversation, or copy its resume command for another terminal.")
-                            .font(.system(size: 12)).foregroundStyle(Theme.muted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading).cardStyle()
+                Toggle("Archived", isOn: $showArchived).toggleStyle(.switch)
+                    .onChange(of: showArchived) { _, _ in visibleCount = 50 }
+                let list = showArchived ? handoff.archived : handoff.records
+                if list.isEmpty {
+                    Text(showArchived ? "No archived handoffs" : "No handoffs yet")
+                        .font(.system(size: 13)).foregroundStyle(Theme.muted)
                 }
-                ForEach(handoff.records.prefix(50)) { record in
-                    HandoffRow(record: record)
-                }
-                Text("Keep ZipSwap running. Preparation failures are recorded and never automatically retried. Automatic preparation is limited to four handoffs per hour.")
+                ForEach(list.prefix(visibleCount)) { record in HandoffRow(record: record, archived: showArchived) }
+                if list.count > visibleCount { Button("Load more") { visibleCount += 50 } }
+                Text("4 preparations/hour · no automatic retry after failure · up to 1,000 archived receipts")
                     .font(.system(size: 11)).foregroundStyle(Theme.faint)
             }
             .padding(28)
         }
         .onAppear { handoff.refreshRecords(); handoff.inspectIntegration() }
+        .sheet(item: Binding(get: { handoff.preview }, set: { handoff.preview = $0 })) { preview in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Review handoff context").font(.title2.bold())
+                Text(preview.workspace).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                Text("Allowing this workspace also permits future handoffs. Check the excerpt for private information.")
+                    .font(.callout).foregroundStyle(.secondary)
+                ScrollView { Text(preview.context).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                HStack {
+                    Button("Cancel") { handoff.preview = nil }
+                    Spacer()
+                    Button("Allow workspace and prepare") { handoff.approvePreview(preview) }.buttonStyle(.borderedProminent)
+                }
+            }.padding(24).frame(minWidth: 720, minHeight: 580)
+        }
     }
 }
 
 private struct HandoffRow: View {
     let record: HandoffRecord
+    var archived = false
     let handoff = HandoffController.shared
 
     var body: some View {
@@ -99,13 +124,24 @@ private struct HandoffRow: View {
             if let id = record.threadID {
                 Text("Codex \(id)").font(Theme.mono(10.5)).foregroundStyle(Theme.faint).textSelection(.enabled)
             }
-            if record.canOpen {
+            if archived {
+                Button("Restore handoff") { handoff.restore(record) }
+            } else if record.phase == .review {
+                HStack {
+                    Button("Review context") { handoff.previewContext(record) }
+                    Button("Archive") { handoff.archive(record) }
+                }
+            } else if record.canOpen {
                 HStack {
                     Button("Open Codex Thread") { Task { await handoff.openThread(record) } }
                         .accessibilityIdentifier("handoff-open-\(record.id)")
                     Button("Copy Resume Command") { handoff.copyResumeCommand(record) }
                         .accessibilityIdentifier("handoff-copy-\(record.id)")
+                    Button("Archive") { handoff.archive(record) }
+                        .disabled([HandoffPhase.running, .opening, .preparing].contains(record.phase))
                 }
+            } else if ![HandoffPhase.preparing, .queued].contains(record.phase) {
+                Button("Archive") { handoff.archive(record) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

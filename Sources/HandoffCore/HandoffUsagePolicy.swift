@@ -7,19 +7,22 @@ public struct HandoffAccountUsage {
     public let blocked: Bool
     public let healthy: Bool
     public let fetchedAt: Date?
+    public let trustUntil: Date?
 
-    public init(active: Bool, disabled: Bool, percent: Double?, blocked: Bool, healthy: Bool, fetchedAt: Date?) {
+    public init(active: Bool, disabled: Bool, percent: Double?, blocked: Bool, healthy: Bool, fetchedAt: Date?, trustUntil: Date? = nil) {
         self.active = active
         self.disabled = disabled
         self.percent = percent
         self.blocked = blocked
         self.healthy = healthy
         self.fetchedAt = fetchedAt
+        self.trustUntil = trustUntil
     }
 
     func known(at now: Date) -> Bool {
         healthy && (percent.map { $0.isFinite && (0...100).contains($0) } ?? false)
-            && (fetchedAt.map { (0...180).contains(now.timeIntervalSince($0)) } ?? false)
+            && UsageValidity.isTrusted(fetchedAt: fetchedAt,
+                until: trustUntil ?? fetchedAt?.addingTimeInterval(180), now: now)
     }
 }
 

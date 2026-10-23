@@ -1,100 +1,42 @@
 import Foundation
+#if SWIFT_PACKAGE
+import HandoffCore
+#endif
 
-/// One short-lived `codex app-server` session over stdio JSON-RPC.
-/// `home` picks the account: nil means the live `~/.codex`, otherwise a stored
-/// account directory passed as CODEX_HOME.
+/// Usage and handoff share the same bounded, sequential protocol client.
+/// No account read starts a model turn. Requests wait for initialize to succeed.
 enum CodexAppServer {
-    struct Request {
-        let method: String
-        let params: [String: Any]?
-    }
+    struct Request { let method: String; let params: [String: Any]? }
 
     static func call(home: URL?, _ requests: [Request], timeout: TimeInterval = 25) async throws -> [[String: Any]] {
-        var env: [String: String] = [:]
-        if let home { env["CODEX_HOME"] = home.path }
-        let process = try Shell.makeProcess("codex", ["app-server"], env: env)
-        let input = Pipe()
-        let output = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        let reader = LineReader()
-        let state = SessionState(expected: requests.count)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            state.onFinish = { result in
-                output.fileHandleForReading.readabilityHandler = nil
-                if process.isRunning { process.terminate() }
-                continuation.resume(with: result)
-            }
-            output.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if data.isEmpty {
-                    state.finish(.failure(ShellError.failed("Codex closed the connection.")))
-                    return
-                }
-                for line in reader.feed(data) {
-                    guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                          let id = obj["id"] as? Int, id >= 100 else { continue }
-                    state.receive(index: id - 100, message: obj)
-                }
-            }
-            do {
-                try process.run()
-            } catch {
-                state.finish(.failure(error))
-                return
-            }
-
-            var lines: [[String: Any]] = [
-                ["id": 1, "method": "initialize", "params": ["clientInfo": ["name": "zipswap", "title": "ZipSwap", "version": "1.0"]]],
-                ["method": "initialized"],
-            ]
-            for (index, request) in requests.enumerated() {
-                var msg: [String: Any] = ["id": 100 + index, "method": request.method]
-                if let params = request.params { msg["params"] = params }
-                lines.append(msg)
-            }
-            let handle = input.fileHandleForWriting
-            for line in lines {
-                if let data = try? JSONSerialization.data(withJSONObject: line) {
-                    handle.write(data)
-                    handle.write(Data([0x0A]))
-                }
-            }
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                state.finish(.failure(ShellError.timedOut("Codex")))
-            }
-        }
+        guard requests.count <= 8 else { throw ShellError.failed("Too many Codex requests in one refresh.") }
+        guard let executable = Shell.which("codex") else { throw ShellError.notFound("codex") }
+        let cancellation = RPCCancellation()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await Task.detached(priority: .utility) {
+                let env = home.map { Shell.environment(["CODEX_HOME": $0.path]) } ?? Shell.environment()
+                let rpc = try CodexRPC(executable: executable,
+                                       arguments: HandoffEnvironment.subscriptionArguments + ["app-server", "--stdio"],
+                                       environment: env, lifetime: timeout, onStart: { client in
+                                           if !cancellation.attach(client) { client.cancel() }
+                                       })
+                guard cancellation.attach(rpc) else { rpc.close(); throw CancellationError() }
+                defer { cancellation.detach(); rpc.close() }
+                return try requests.map { ["result": try rpc.call($0.method, params: $0.params ?? [:])] }
+            }.value
+        } onCancel: { cancellation.cancel() }
     }
 }
 
-private final class SessionState: @unchecked Sendable {
+private final class RPCCancellation: @unchecked Sendable {
     private let lock = NSLock()
-    private var results: [Int: [String: Any]] = [:]
-    private var done = false
-    private let expected: Int
-    var onFinish: ((Result<[[String: Any]], Error>) -> Void)?
-
-    init(expected: Int) { self.expected = expected }
-
-    func receive(index: Int, message: [String: Any]) {
-        lock.lock()
-        results[index] = message
-        let complete = results.count >= expected
-        let ordered = (0..<expected).map { results[$0] ?? [:] }
-        lock.unlock()
-        if complete { finish(.success(ordered)) }
-    }
-
-    func finish(_ result: Result<[[String: Any]], Error>) {
-        lock.lock()
-        if done { lock.unlock(); return }
-        done = true
-        let callback = onFinish
-        lock.unlock()
-        callback?(result)
+    private var rpc: CodexRPC?
+    private var cancelled = false
+    func attach(_ rpc: CodexRPC) -> Bool { lock.withLock { if cancelled { return false }; self.rpc = rpc; return true } }
+    func detach() { lock.withLock { rpc = nil } }
+    func cancel() {
+        let client = lock.withLock { () -> CodexRPC? in cancelled = true; return rpc }
+        client?.cancel()
     }
 }

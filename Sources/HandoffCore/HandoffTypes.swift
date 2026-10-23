@@ -16,6 +16,7 @@ public struct HandoffSettings: Codable, Equatable {
     public var enabledAt: Date?
     public var automaticallyOpen = true
     public var warningPercent = 90.0
+    public var approvedWorkspaces: [String]?
     public init() {}
 }
 
@@ -38,7 +39,7 @@ public struct HandoffUsage: Codable {
 }
 
 public enum HandoffPhase: String, Codable {
-    case queued, preparing, ready, opened, failed, skipped, cancelled
+    case queued, preparing, review, ready, opening, opened, running, failed, skipped, cancelled
 }
 
 public struct HandoffRecord: Codable, Identifiable, Equatable {
@@ -56,6 +57,12 @@ public struct HandoffRecord: Codable, Identifiable, Equatable {
     public var attemptedAt: Date?
     public var lastEventAt: Date?
     public var admissionChecks: Int?
+    public var codexAccountID: String?
+    public var contextSHA256: String?
+    public var reviewedContextSHA256: String?
+    public var consumerPID: Int32?
+    public var consumerStartTime: Double?
+    public var continuationAttemptedAt: Date?
     public var detail = "Waiting for ZipSwap to prepare the Codex thread."
 
     public init(sessionID: String, transcriptPath: String, cwd: String, now: Date) {

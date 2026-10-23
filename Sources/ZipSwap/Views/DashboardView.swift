@@ -12,6 +12,14 @@ struct DashboardView: View {
         HStack(spacing: 0) {
             sidebar
             Rectangle().fill(Theme.line).frame(width: 1)
+            VStack(spacing: 0) {
+                if let error = model.persistentError {
+                    HStack {
+                        Text(error).font(.system(size: 12)).foregroundStyle(Theme.amber).textSelection(.enabled)
+                        Spacer()
+                        Button("Dismiss") { model.persistentError = nil }
+                    }.padding(14)
+                }
             Group {
                 if selection == "handoffs" {
                     HandoffView()
@@ -22,10 +30,11 @@ struct DashboardView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
         .background(Theme.bg)
         .preferredColorScheme(.dark)
-        .frame(minWidth: 980, minHeight: 680)
+        .frame(minWidth: 860, minHeight: 540)
         .onAppear { model.panelOpened() }
         .onReceive(NotificationCenter.default.publisher(for: .showHandoffs)) { _ in selection = "handoffs" }
     }
@@ -46,6 +55,8 @@ struct DashboardView: View {
             SidebarItem(title: "Overview", systemImage: "square.grid.2x2", selected: selection == "overview") { selection = "overview" }
             SidebarItem(title: "Handoffs", systemImage: "arrow.triangle.branch", selected: selection == "handoffs") { selection = "handoffs" }
 
+            ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
             ForEach(Provider.allCases) { provider in
                 let list = provider == .claude ? model.claude : model.codex
                 SectionLabel(text: provider.title).padding(.horizontal, 10).padding(.top, 16).padding(.bottom, 4)
@@ -56,10 +67,12 @@ struct DashboardView: View {
                     Text("No accounts yet").font(.system(size: 11.5)).foregroundStyle(Theme.faint).padding(.horizontal, 10)
                 }
             }
-            Spacer()
+            }
+            }
+            Spacer(minLength: 0)
             HStack(spacing: 8) {
                 Circle().fill(model.claudeEngineRunning ? Theme.mint : Theme.faint).frame(width: 7, height: 7)
-                Text(model.claudeEngineRunning ? "Claude Auto-Switch Running" : "Claude Auto-Switch Idle")
+                Text("Claude auto-switch: \(model.claudeEngineStatus)")
                     .font(.system(size: 11.5)).foregroundStyle(Theme.muted)
             }
             .padding(10)
@@ -112,7 +125,7 @@ struct SidebarAccount: View {
                     Text(account.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
                     UsageBar(pct: account.tightest, height: 3)
                 }
-                Text(Format.pct(account.tightest)).font(Theme.mono(10.5)).foregroundStyle(Theme.muted).frame(width: 36, alignment: .trailing)
+                Text(account.usageDisplay).font(Theme.mono(10.5)).foregroundStyle(Theme.muted).frame(width: 36, alignment: .trailing)
             }
             .padding(.vertical, 7)
             .padding(.horizontal, 6)
@@ -128,13 +141,14 @@ struct AccountDetail: View {
     let model = AppModel.shared
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 16) {
                 Avatar(account: account, size: 54)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
                         NameField(account: account, font: .system(size: 26, weight: .semibold))
-                        if account.isActive { Chip(text: "Active") }
+                        if account.isActive { Chip(text: account.activeIdentityVerified ? "Active" : "Selected · unverified", color: account.activeIdentityVerified ? Theme.mint : Theme.amber) }
                         if account.disabled { Chip(text: "Skipped by Auto-Switch", color: Theme.faint) }
                     }
                     Text([account.provider.title, account.plan, account.email].filter { !$0.isEmpty }.joined(separator: " · "))
@@ -143,7 +157,7 @@ struct AccountDetail: View {
                 Spacer()
                 if !account.isActive {
                     if account.isBlocked {
-                        Text("Limited Until \(account.backAt.map(Format.clock) ?? "Reset")")
+                        Text("Limited Until \(account.backAt.map(Format.resetClock) ?? "Reset")")
                             .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
                             .padding(.horizontal, 14).frame(height: 34)
                             .background(RoundedRectangle(cornerRadius: 8).fill(Theme.line))
@@ -156,17 +170,27 @@ struct AccountDetail: View {
                                 .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mint))
                         }
                         .buttonStyle(.plain)
+                        .disabled(model.coordinator.busy(account.provider) || account.manualSwitchReason() != nil)
                     }
                 }
             }
 
-            if let problem = account.problem {
+            Text("Default CLI scope · Israel time").font(.system(size: 11.5)).foregroundStyle(Theme.muted)
+            if let problem = account.problem ?? (account.provider == .claude ? model.claudeError : model.codexError) {
                 Label(problem, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.amber)
             }
 
+            HStack {
+                if account.provider == .claude {
+                    Button(model.busy.contains(account.id) ? "Signing in…" : "Repair login") { model.repairClaudeLogin(account) }
+                        .disabled(model.coordinator.busy(.claude))
+                }
+                if model.loginTask != nil { Button("Cancel sign-in") { model.cancelLogin() } }
+                if let reason = account.eligibilityReason() { Text(reason).font(.system(size: 12)).foregroundStyle(Theme.amber) }
+            }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                ForEach(account.windows) { WindowCard(window: $0) }
+                ForEach(account.windows) { WindowCard(window: $0, stale: account.stale) }
                 if let credits = account.credits {
                     StatCard(title: "Credits", value: credits, detail: "balance on this ChatGPT account")
                 }
@@ -176,7 +200,11 @@ struct AccountDetail: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Forecast").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
                     Text(account.problem ?? Pace.of(account).text).font(.system(size: 13)).foregroundStyle(Theme.text2)
-                    Text("Usage updated \(Format.ago(account.fetchedAt)).").font(.system(size: 11.5)).foregroundStyle(Theme.faint)
+                    // The schedule can start before a just-fetched reading.
+                    // Use the live clock for validity, not the scheduled tick.
+                    TimelineView(.everyMinute) { _ in
+                        Text(account.usageFreshness(now: .now)).font(.system(size: 11.5)).foregroundStyle(account.stale ? Theme.amber : Theme.faint)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .cardStyle()
@@ -186,11 +214,13 @@ struct AccountDetail: View {
                         HStack {
                             Text("Free Resets").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
                             Spacer()
-                            if !account.resetCredits.isEmpty { ResetCreditControl(account: account) }
+                            if !account.resetCredits.isEmpty || account.pendingResetID != nil { ResetCreditControl(account: account) }
                         }
                         if account.resetCredits.isEmpty {
                             Text("None available on this account.").font(.system(size: 12.5)).foregroundStyle(Theme.muted)
                         }
+                        if let problem = account.resetProblem { Text(problem).font(.system(size: 12)).foregroundStyle(Theme.amber) }
+                        if account.pendingResetID != nil { Text("A previous reset is unconfirmed. Retry uses the same credit.").font(.system(size: 12)).foregroundStyle(Theme.amber) }
                         ForEach(account.resetCredits) { credit in
                             HStack {
                                 Text(credit.title).font(.system(size: 12.5)).foregroundStyle(Theme.text2)
@@ -207,26 +237,31 @@ struct AccountDetail: View {
             Spacer()
         }
         .padding(28)
+        }
     }
 }
 
 struct WindowCard: View {
     let window: UsageWindow
+    var stale = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text2)
                 Spacer()
-                Text(window.resetsAt.map(Format.clock) ?? "Not Started").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                Text(window.resetsAt.map(Format.resetClock) ?? "Not Started").font(Theme.mono(11)).foregroundStyle(Theme.faint)
+                    .help(window.resetsAt.map(Format.exactReset) ?? "No reset deadline reported")
             }
-            Text(Format.pct(window.pct)).font(.system(size: 34, weight: .semibold)).monospacedDigit().foregroundStyle(Theme.text)
+            Text(Format.pct(window.pct)).font(.system(size: 34, weight: .semibold)).monospacedDigit().foregroundStyle(stale ? Theme.faint : Theme.text)
             UsageBar(pct: window.pct, height: 8, pace: window.expectedPct)
             HStack {
                 Text(window.expectedPct.map { "even pace: \(Format.pct($0))" } ?? "rolling window")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted)
                 Spacer()
-                Text(Format.countdown(window.resetsAt)).font(Theme.mono(11)).foregroundStyle(Theme.muted)
+                TimelineView(.everyMinute) { _ in
+                    Text(Format.countdown(window.resetsAt, now: .now)).font(Theme.mono(11)).foregroundStyle(Theme.muted)
+                }
             }
         }
         .cardStyle()
@@ -236,7 +271,7 @@ struct WindowCard: View {
         switch window.label {
         case "5h": return "5-Hour"
         case "Week": return "Weekly"
-        default: return "\(window.label) Weekly"
+        default: return window.windowMinutes == 10080 ? "\(window.label) Weekly" : window.label
         }
     }
 }
@@ -259,10 +294,20 @@ struct StatCard: View {
 
 struct OverviewDetail: View {
     let model = AppModel.shared
-
     var body: some View {
-        @Bindable var model = model
-        HStack(alignment: .top, spacing: 16) {
+        GeometryReader { geometry in
+            ScrollView {
+                if geometry.size.width < 760 {
+                    VStack(alignment: .leading, spacing: 16) { historyCard; settingsPanel }
+                        .padding(24)
+                } else {
+                    HStack(alignment: .top, spacing: 16) { historyCard; settingsPanel.frame(width: 330) }
+                        .padding(24)
+                }
+            }
+        }
+    }
+    private var historyCard: some View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Recent Switches").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
                 if model.history.isEmpty {
@@ -281,16 +326,19 @@ struct OverviewDetail: View {
                 }
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .cardStyle()
 
+    }
+    @ViewBuilder private var settingsPanel: some View {
+        @Bindable var model = model
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Auto-Switch").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
                     Lever(title: "Claude Code", isOn: $model.claudeAutoOn, value: $model.claudeThreshold,
                           note: model.legacyRunning && model.claudeAutoOn ? "Paused While the Old Menu Bar Runs" : nil)
                     Lever(title: "Codex", isOn: $model.codexAutoOn, value: $model.codexThreshold)
-                    Text("Claude switching runs claude-swap's own engine and honors its cooldown and Fable watch. Codex switching checks every 3 minutes and waits 5 minutes between hops.")
+                    Text("Default CLI accounts · Codex waits 5 minutes between switches")
                         .font(.system(size: 11)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
                 }
                 .cardStyle()
@@ -303,10 +351,29 @@ struct OverviewDetail: View {
                         ToggleSwitch(isOn: $model.launchAtLogin, label: "Open at Login")
                     }
                     HStack {
-                        Text("Version \(Bundle.main.shortVersion)").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                        Text("Version \(Bundle.main.shortVersion) (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "local"))")
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.text2)
                         Spacer()
                         Button("Check for Updates") { Updater.shared.checkForUpdates() }.controlSize(.small)
                     }
+                    Text("Claude auto-switch: \(model.claudeEngineStatus)").font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    if model.claudeAutoOn && !model.claudeEngineRunning && !model.legacyRunning {
+                        Button("Retry auto-switch") { model.engine.retry(); model.applyClaudeAuto() }
+                    }
+                    Button("Export diagnostics") { model.exportDiagnostics() }
+                    if model.codexError != nil { Button("Restore account-list backup") { model.restoreCodexIndex() } }
+                    if model.codexError != nil { Button("Recover saved logins") { model.recoverSavedLogins() } }
+                    ForEach(model.runtimeTools) { tool in
+                        HStack {
+                            Text(tool.name).font(.system(size: 12)).foregroundStyle(Theme.text2)
+                            Spacer()
+                            Text(tool.version).font(Theme.mono(11)).foregroundStyle(tool.issue == nil ? Theme.muted : Theme.amber)
+                        }
+                        if let issue = tool.issue { Text(issue).font(.system(size: 12)).foregroundStyle(Theme.amber) }
+                    }
+                    Button("Check tools") { Task { await model.checkTools(); await model.refreshAll() } }
+                    Text(Bundle.main.infoDictionary?["ZipSwapSourceRevision"] as? String ?? "Local source revision unrecorded")
+                        .font(Theme.mono(10)).foregroundStyle(Theme.muted).textSelection(.enabled)
                     if model.legacyRunning {
                         HStack {
                             Text("Old cswap Menu Bar Is Running").font(.system(size: 12.5)).foregroundStyle(Theme.amber)
@@ -317,9 +384,6 @@ struct OverviewDetail: View {
                 }
                 .cardStyle()
             }
-            .frame(width: 360)
-        }
-        .padding(28)
     }
 }
 

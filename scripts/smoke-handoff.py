@@ -64,7 +64,8 @@ def main():
     ]) + "\n")
     now = time.time() - 978307200  # Foundation Date's reference epoch.
     (state / "settings.json").write_text(json.dumps({"enabled": True, "enabledAt": now - 1,
-                                                     "automaticallyOpen": False, "warningPercent": 90}))
+                                                     "automaticallyOpen": False, "warningPercent": 90,
+                                                     "approvedWorkspaces": [str(workspace.resolve())]}))
     (state / "usage.json").write_text(json.dumps({"checkedAt": now, "activePercent": 100,
                                                   "claudeExhausted": True, "explanation": "Synthetic exhausted usage for integration testing."}))
     event = json.dumps({"session_id": sid, "transcript_path": str(transcript), "cwd": str(workspace),

@@ -1,6 +1,7 @@
 import Foundation
 
 public protocol HandoffBackend {
+    var accountID: String? { get }
     func preflight() throws
     func create(cwd: String) throws -> String
     func inject(threadID: String, context: String) throws
@@ -9,8 +10,11 @@ public protocol HandoffBackend {
     func close()
 }
 
+public extension HandoffBackend { var accountID: String? { nil } }
+
 public final class LocalCodexBackend: HandoffBackend {
     private let rpc: CodexRPC
+    public private(set) var accountID: String?
     public init(rpc: CodexRPC) { self.rpc = rpc }
 
     public func preflight() throws {
@@ -19,23 +23,14 @@ public final class LocalCodexBackend: HandoffBackend {
             throw HandoffError.unavailable("Sign in to Codex with ChatGPT before using handoff. API billing is not used.")
         }
         let limits = try rpc.call("account/rateLimits/read")
-        guard let snapshot = limits["rateLimits"] as? [String: Any] else {
-            throw HandoffError.unavailable("Codex subscription usage is unavailable. No thread was created.")
+        guard let identity = limits["accountId"] as? String, !identity.isEmpty else {
+            throw HandoffError.unavailable("Codex did not verify the subscription account. No thread was created.")
         }
-        guard limits["ordinaryUsageAllowed"] as? Bool != false,
-              !(snapshot["rateLimitReachedType"] is String) else {
+        let snapshot = try CodexUsageSnapshot(limits, expectedAccountID: identity)
+        guard snapshot.ordinaryUsageAllowed, !snapshot.reached else {
             throw HandoffError.unavailable("Codex has reached its usage limit too. No credits or resets were purchased.")
         }
-        var foundWindow = false
-        for key in ["primary", "secondary"] {
-            if let window = snapshot[key] as? [String: Any], let used = window["usedPercent"] as? Double {
-                foundWindow = true
-                guard used.isFinite, used >= 0, used < 100 else {
-                    throw HandoffError.unavailable("Codex has no confirmed subscription allowance remaining.")
-                }
-            }
-        }
-        guard foundWindow else { throw HandoffError.unavailable("Codex did not report a subscription allowance.") }
+        accountID = identity
     }
 
     public func create(cwd: String) throws -> String {
@@ -92,21 +87,39 @@ public struct HandoffEngine {
             }
             return try store.record(id)
         }
-        guard try store.claim(id, now: now) else { return try store.record(id) }
+        guard HandoffPrivacy.allowed(record.cwd, settings: try store.settings()) else {
+            try store.update(id) { $0.phase = .review; $0.detail = "Review the context and allow this workspace before transferring it to Codex."; $0.updatedAt = now }
+            return try store.record(id)
+        }
+        let excerpt: TranscriptExcerpt
+        let context: String
+        let digest: String
         do {
             let input = ClaudeHookInput(sessionID: record.sourceSessionID, transcriptPath: record.transcriptPath,
                                        cwd: record.cwd, event: "StopFailure", error: "rate_limit", agentID: nil)
             try HandoffPaths.validate(input, projects: projects)
-            let excerpt = try TranscriptReader.read(path: record.transcriptPath, sessionID: record.sourceSessionID)
-            let context = HandoffContext.make(record: record, excerpt: excerpt, workspaceStatus: workspaceStatus(record.cwd))
-            try requireEnabled()
+            excerpt = try TranscriptReader.read(path: record.transcriptPath, sessionID: record.sourceSessionID)
+            context = HandoffContext.make(record: record, excerpt: excerpt, workspaceStatus: workspaceStatus(record.cwd))
+            digest = HandoffPrivacy.digest(context)
+        } catch {
+            try store.update(id) { $0.phase = .failed; $0.detail = ContextRedaction.clean(error.localizedDescription); $0.updatedAt = now }
+            return try store.record(id)
+        }
+        if let reviewed = record.reviewedContextSHA256, reviewed != digest {
+            try store.update(id) { $0.phase = .review; $0.reviewedContextSHA256 = nil; $0.detail = "The context changed. Review it again before transfer."; $0.updatedAt = now }
+            return try store.record(id)
+        }
+        guard try store.claim(id, now: now) else { return try store.record(id) }
+        do {
+            try requireEnabled(cwd: record.cwd)
             let client = try backend()
             defer { client.close() }
             try client.preflight()
-            try requireEnabled()
+            try store.update(id) { $0.codexAccountID = client.accountID; $0.contextSHA256 = digest }
+            try requireEnabled(cwd: record.cwd)
             let threadID = try client.create(cwd: record.cwd)
             try store.update(id) { $0.threadID = threadID; $0.updatedAt = Date() }
-            try requireEnabled()
+            try requireEnabled(cwd: record.cwd)
             try client.inject(threadID: threadID, context: context)
             try client.name(threadID: threadID, name: "Claude handoff · \(record.title) · \(id.prefix(8))")
             try client.verify(threadID: threadID)
@@ -126,8 +139,9 @@ public struct HandoffEngine {
         return try store.record(id)
     }
 
-    private func requireEnabled() throws {
-        guard try store.settings().enabled else {
+    private func requireEnabled(cwd: String) throws {
+        let settings = try store.settings()
+        guard settings.enabled, HandoffPrivacy.allowed(cwd, settings: settings) else {
             throw HandoffError.unavailable("Handoff was turned off during preparation. No Codex turn was started.")
         }
     }

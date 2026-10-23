@@ -33,6 +33,11 @@ public enum HandoffCommands {
         ([codex.path] + (try resumeArguments(record, initial: false))).map(quote).joined(separator: " ")
     }
 
+    public static func guardedResumeCommand(_ record: HandoffRecord, helper: URL, root: URL) throws -> String {
+        guard record.canOpen, HandoffPaths.validID(record.id) else { throw HandoffError.invalid("The handoff is not ready.") }
+        return [helper.path, "resume", "--root", root.path, "--id", record.id].map(quote).joined(separator: " ")
+    }
+
     public static func terminalScript(helper: URL, root: URL, recordID: String) throws -> Data {
         guard HandoffPaths.validID(recordID), helper.path.hasPrefix("/"), root.path.hasPrefix("/") else {
             throw HandoffError.invalid("Invalid thread launch parameters.")

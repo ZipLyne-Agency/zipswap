@@ -12,14 +12,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export MARKETING_VERSION="${1:?usage: scripts/release.sh <version> <build-number>}"
+export ZIPSWAP_BUILD_DIR="${ZIPSWAP_BUILD_DIR:-${RUNNER_TEMP:-$HOME/Assets/ZipSwap/temporary}/build}"
+export ZIPSWAP_RELEASE_DIR="${ZIPSWAP_RELEASE_DIR:-$ZIPSWAP_BUILD_DIR/release}"
 export CURRENT_PROJECT_VERSION="${2:?usage: scripts/release.sh <version> <build-number>}"
 
 scripts/build.sh
 
-APP=build/DerivedData/Build/Products/Release/ZipSwap.app
-OUT=build/release
-rm -rf "${OUT:?}"
-mkdir -p "$OUT"
+APP="$ZIPSWAP_BUILD_DIR/DerivedData/Build/Products/Release/ZipSwap.app"
+mkdir -p "$ZIPSWAP_BUILD_DIR" "$ZIPSWAP_RELEASE_DIR"
+OUT=$(mktemp -d "$ZIPSWAP_BUILD_DIR/release-stage.XXXXXX")
 ZIP="$OUT/ZipSwap-$MARKETING_VERSION.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
@@ -42,17 +43,23 @@ if [ ${#NOTARY_ARGS[@]} -gt 0 ]; then
     exit 1
   fi
   xcrun stapler staple "$APP"
-  rm -f "$ZIP"
+  xcrun stapler validate "$APP"
+  spctl --assess --type execute --verbose=2 "$APP"
+  rm -f "${ZIP:?}"
   ditto -c -k --keepParent "$APP" "$ZIP"
 else
-  echo "no notary credentials, the zip is signed but not notarized"
+  echo "A distributable release requires notarization credentials." >&2
+  exit 1
 fi
 
-SPARKLE_BIN="$(find build/DerivedData/SourcePackages/artifacts -type d -path '*Sparkle/bin' | head -1)"
+SPARKLE_BIN="$(find "$ZIPSWAP_BUILD_DIR/DerivedData/SourcePackages/artifacts" -type d -path '*Sparkle/bin' | head -1)"
 KEY_ARGS=(--account zipswap)
 [ -n "${SPARKLE_KEY_FILE:-}" ] && KEY_ARGS=(--ed-key-file "$SPARKLE_KEY_FILE")
 "$SPARKLE_BIN/generate_appcast" "${KEY_ARGS[@]}" \
   --download-url-prefix "https://github.com/ZipLyne-Agency/zipswap/releases/download/v$MARKETING_VERSION/" \
   "$OUT"
 grep -q 'sparkle:edSignature' "$OUT/appcast.xml" || { echo "appcast is missing its EdDSA signature"; exit 1; }
-echo "release ready in $OUT"
+mv "$ZIP" "$ZIPSWAP_RELEASE_DIR/"
+mv "$OUT/appcast.xml" "$ZIPSWAP_RELEASE_DIR/"
+[ ! -f "$OUT/notarization.json" ] || cp "$OUT/notarization.json" "$ZIPSWAP_RELEASE_DIR/notarization-$MARKETING_VERSION.json"
+echo "release ready in $ZIPSWAP_RELEASE_DIR"

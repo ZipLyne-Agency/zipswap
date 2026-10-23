@@ -9,6 +9,9 @@ final class HandoffController {
     static let shared = HandoffController()
     private(set) var settings = HandoffSettings()
     private(set) var records: [HandoffRecord] = []
+    private(set) var archived: [HandoffRecord] = []
+    var preview: ContextPreview?
+    struct ContextPreview: Identifiable { let id: String; let workspace: String; let context: String; let hash: String }
     private(set) var integrationInstalled = false
     private(set) var installing = false
     private(set) var preparing = false
@@ -79,7 +82,7 @@ final class HandoffController {
         let model = AppModel.shared
         let accounts = model.claude.map {
             HandoffAccountUsage(active: $0.isActive, disabled: $0.disabled, percent: $0.windows.isEmpty ? nil : $0.tightest,
-                                blocked: $0.isBlocked, healthy: $0.problem == nil, fetchedAt: $0.fetchedAt)
+                                blocked: $0.isBlocked, healthy: $0.problem == nil && !$0.stale && (!$0.isActive || $0.activeIdentityVerified), fetchedAt: $0.fetchedAt, trustUntil: $0.trustUntil)
         }
         let usage = HandoffUsagePolicy.evaluate(accounts, rotationEnabled: model.claudeAutoOn, now: Date())
         do { try store.saveUsage(usage) } catch { message = error.localizedDescription }
@@ -96,7 +99,7 @@ final class HandoffController {
     }
 
     func refreshRecords() {
-        do { records = try store.records() } catch { message = error.localizedDescription }
+        do { records = try store.records(); archived = try store.archivedRecords() } catch { message = error.localizedDescription }
     }
 
     private func tick() async {
@@ -163,12 +166,47 @@ final class HandoffController {
 
     func copyResumeCommand(_ record: HandoffRecord) {
         do {
-            guard let codex = HandoffCommands.find("codex") else { throw HandoffError.unavailable("Codex CLI is missing.") }
-            let command = try HandoffCommands.resumeCommand(record, codex: codex)
+            guard let helper = HandoffIntegration.helper else { throw HandoffError.unavailable("The handoff helper is missing.") }
+            let command = try HandoffCommands.guardedResumeCommand(record, helper: helper, root: store.root)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(command, forType: .string)
             message = "Resume command copied. Paste it into your preferred terminal."
         } catch { message = error.localizedDescription }
+    }
+
+    func previewContext(_ record: HandoffRecord) {
+        Task {
+            do {
+                let value = try await Task.detached(priority: .utility) {
+                    let input = ClaudeHookInput(sessionID: record.sourceSessionID, transcriptPath: record.transcriptPath,
+                                                cwd: record.cwd, event: "StopFailure", error: "rate_limit", agentID: nil)
+                    try HandoffPaths.validate(input, projects: HandoffPaths.claudeProjects)
+                    let excerpt = try TranscriptReader.read(path: record.transcriptPath, sessionID: record.sourceSessionID)
+                    let context = HandoffContext.make(record: record, excerpt: excerpt, workspaceStatus: HandoffCommands.workspaceStatus(record.cwd))
+                    return ContextPreview(id: record.id, workspace: record.cwd, context: context, hash: HandoffPrivacy.digest(context))
+                }.value
+                preview = value
+            } catch { message = error.localizedDescription }
+        }
+    }
+    func approvePreview(_ value: ContextPreview) {
+        do {
+            try store.approveWorkspace(value.id, contextHash: value.hash)
+            settings = try store.settings(); preview = nil; refreshRecords()
+            Task { await tick() }
+        } catch { message = error.localizedDescription }
+    }
+    func revokeWorkspace(_ path: String) {
+        do { try store.revokeWorkspace(path); settings = try store.settings() }
+        catch { message = error.localizedDescription }
+    }
+    func archive(_ record: HandoffRecord) {
+        do { try store.archive(record.id); refreshRecords() }
+        catch { message = error.localizedDescription }
+    }
+    func restore(_ record: HandoffRecord) {
+        do { try store.restoreArchive(record.id); refreshRecords() }
+        catch { message = error.localizedDescription }
     }
 
     private func notify(_ record: HandoffRecord) {

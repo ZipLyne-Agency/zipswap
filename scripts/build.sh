@@ -8,6 +8,8 @@
 # the versions in project.yml (scripts/release.sh and CI set them).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export ZIPSWAP_BUILD_DIR="${ZIPSWAP_BUILD_DIR:-${RUNNER_TEMP:-$HOME/Assets/ZipSwap/temporary}/build}"
+mkdir -p "$ZIPSWAP_BUILD_DIR"
 
 [ -d Resources/Assets.xcassets/AppIcon.appiconset ] || swift scripts/make-icon.swift "$PWD"
 xcodegen generate --quiet
@@ -23,11 +25,13 @@ if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
 fi
 
 xcodebuild -project ZipSwap.xcodeproj -scheme ZipSwap -configuration Release \
-  -derivedDataPath build/DerivedData -destination 'generic/platform=macOS' \
+  -derivedDataPath "$ZIPSWAP_BUILD_DIR/DerivedData" -destination 'generic/platform=macOS' \
   -quiet build ${OVERRIDES[@]+"${OVERRIDES[@]}"}
 
-APP=build/DerivedData/Build/Products/Release/ZipSwap.app
+APP="$ZIPSWAP_BUILD_DIR/DerivedData/Build/Products/Release/ZipSwap.app"
 [ -d "$APP" ] || { echo "build failed"; exit 1; }
+
+python3 scripts/stamp-build.py "$APP"
 
 # Xcode re-signs Sparkle.framework but not the helpers inside it, which keep
 # Sparkle's own signature and fail notarization. Re-sign them inside out, the
@@ -44,15 +48,12 @@ if [ -n "$IDENTITY" ]; then
   "${SIGN[@]}" "$SPK/Versions/B/Updater.app"
   "${SIGN[@]}" "$SPK"
   "${SIGN[@]}" --entitlements Resources/ZipSwap.entitlements "$APP"
+else
+  codesign --force --sign - "$APP"
 fi
 codesign --verify --deep --strict "$APP"
 echo "built $APP"
 
 if [ "${1:-}" = "--install" ]; then
-  mkdir -p "$HOME/Applications"
-  DEST="$HOME/Applications/ZipSwap.app"
-  if pgrep -x ZipSwap >/dev/null; then osascript -e 'quit app "ZipSwap"' || true; sleep 1; fi
-  rm -rf "${DEST:?}"
-  ditto "$APP" "$DEST"
-  echo "installed $DEST"
+  python3 scripts/install-app.py "$APP"
 fi

@@ -82,14 +82,23 @@ public struct HandoffStore {
             var all = try records()
             guard let index = all.firstIndex(where: { $0.id == id }), all[index].phase == .queued else { return false }
             guard !all.contains(where: { $0.phase == .preparing }) else { return false }
-            let recent = all.filter { $0.attemptedAt.map { (0..<3600).contains(now.timeIntervalSince($0)) } ?? false }
+            var attempts = try read([AttemptStamp].self, name: "attempts.json") ?? []
+            attempts = attempts.filter { (0..<3600).contains(now.timeIntervalSince($0.at)) }
+            // Adopt old receipts once. Archiving or trimming metadata can never
+            // reset the admission budget after this durable reservation.
+            for receipt in all + (try archivedRecords()) {
+                if let at = receipt.attemptedAt, (0..<3600).contains(now.timeIntervalSince(at)),
+                   !attempts.contains(where: { $0.id == receipt.id }) { attempts.append(AttemptStamp(id: receipt.id, at: at)) }
+            }
             if all[index].eventDate < enabledAt || !(0...300).contains(now.timeIntervalSince(all[index].eventDate)) {
                 all[index].phase = .skipped
                 all[index].detail = "This request expired. Start a new Claude session to enable automatic handoff again."
-            } else if recent.count >= 4 {
+            } else if attempts.count >= 4 {
                 all[index].phase = .skipped
                 all[index].detail = "Automatic handoff limit reached (4 per hour). No Codex turn was started."
             } else {
+                attempts.append(AttemptStamp(id: id, at: now))
+                try write(attempts, name: "attempts.json")
                 all[index].phase = .preparing
                 all[index].attemptedAt = now
                 all[index].detail = "Preparing the Codex conversation."
@@ -115,18 +124,28 @@ public struct HandoffStore {
     public func recoverInterrupted(now: Date) throws {
         try locked {
             var all = try records()
+            var changed = false
             for i in all.indices where all[i].phase == .preparing && now.timeIntervalSince(all[i].updatedAt) > 120 {
                 all[i].phase = .failed
                 all[i].detail = "Preparation was interrupted. No automatic retry will create a duplicate thread."
                 all[i].updatedAt = now
+                changed = true
             }
-            try write(all, name: "records.json")
+            for i in all.indices where [.opening, .running].contains(all[i].phase) {
+                let alive = all[i].consumerPID.flatMap { pid in all[i].consumerStartTime.map { ProcessIdentity.matches(pid: pid, startTime: $0) } } ?? false
+                guard !alive, now.timeIntervalSince(all[i].updatedAt) > 120 else { continue }
+                all[i].phase = .failed; all[i].consumerPID = nil; all[i].consumerStartTime = nil
+                all[i].detail = "The Codex CLI stopped unexpectedly. Reopen its saved thread; an ambiguous initial prompt will not be sent again."
+                all[i].updatedAt = now; changed = true
+            }
+            if changed { try write(all, name: "records.json") }
         }
     }
 
     private struct WarningStamp: Codable { let level: Int; let at: Date }
+    private struct AttemptStamp: Codable { let id: String; let at: Date }
 
-    private func read<T: Decodable>(_ type: T.Type, name: String) throws -> T? {
+    func read<T: Decodable>(_ type: T.Type, name: String) throws -> T? {
         let url = root.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
@@ -153,7 +172,7 @@ public struct HandoffStore {
         return url
     }
 
-    private func write<T: Encodable>(_ value: T, name: String) throws {
+    func write<T: Encodable>(_ value: T, name: String) throws {
         let data = try JSONEncoder().encode(value)
         _ = try writePrivate(data, name: name)
     }
@@ -166,14 +185,14 @@ public struct HandoffStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
     }
 
-    private func locked<T>(_ operation: () throws -> T) throws -> T {
+    func locked<T>(_ operation: () throws -> T) throws -> T {
         try ensureRoot()
         let fd = Darwin.open(root.appendingPathComponent("state.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
         guard fd >= 0 else { throw HandoffError.unavailable("Cannot lock ZipSwap handoff state.") }
         defer { Darwin.close(fd) }
-        let deadline = Date().addingTimeInterval(0.2)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.2
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            guard Date() < deadline else {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
                 throw HandoffError.unavailable("ZipSwap is updating handoff state. Try again.")
             }
             Thread.sleep(forTimeInterval: 0.01)

@@ -1,4 +1,7 @@
 import Foundation
+#if SWIFT_PACKAGE
+import HandoffCore
+#endif
 
 /// Codex has no account switcher of its own, so ZipSwap keeps one: each saved
 /// account lives in its own CODEX_HOME folder holding just its auth.json, and
@@ -29,78 +32,50 @@ enum CodexService {
 
     // MARK: store
 
-    static func loadIndex() -> [CodexStoredAccount] {
-        guard let data = try? Data(contentsOf: indexURL) else { return [] }
-        return (try? JSONDecoder().decode([CodexStoredAccount].self, from: data)) ?? []
+    static var store: CodexStore { CodexStore(root: storeRoot, liveHome: liveHome) }
+    static func loadIndex() throws -> [CodexStoredAccount] { try store.loadIndex() }
+    static func saveIndex(_ accounts: [CodexStoredAccount], replacing previous: [CodexStoredAccount]) throws {
+        try store.saveIndex(accounts, replacing: previous)
     }
-
-    static func saveIndex(_ accounts: [CodexStoredAccount]) {
-        ensureStore()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(accounts) {
-            try? data.write(to: indexURL, options: .atomic)
-        }
+    static func ensureStore() throws {
+        try FileManager.default.createDirectory(at: storeRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
-
-    static func ensureStore() {
-        try? FileManager.default.createDirectory(at: storeRoot, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-    }
-
-    /// The ChatGPT account id inside an auth.json, used to tell accounts apart.
-    static func accountId(in url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = root["tokens"] as? [String: Any] else { return nil }
-        return tokens["account_id"] as? String
-    }
-
+    static func accountId(in url: URL) -> String? { (try? store.credential(url))?.accountID }
     static func liveAccountId() -> String? { accountId(in: liveAuth) }
-
-    /// Writes auth data with owner-only permissions, atomically.
     static func writeAuth(_ data: Data, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        let temp = url.deletingLastPathComponent().appendingPathComponent(".auth.json.zipswap-tmp")
-        FileManager.default.createFile(atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600])
-        if FileManager.default.fileExists(atPath: url.path) {
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
-        } else {
-            try FileManager.default.moveItem(at: temp, to: url)
-        }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.write(data, to: url, expected: try PrivateFile.readIfPresent(url), compare: true)
     }
-
-    /// Copies the live login back into its stored folder so the store always
-    /// holds the newest refresh token, and adopts a live login it hasn't seen.
-    static func syncLive(into accounts: inout [CodexStoredAccount]) {
-        guard let liveId = liveAccountId(), let data = try? Data(contentsOf: liveAuth) else { return }
-        if let match = accounts.first(where: { $0.accountId == liveId }) {
-            let stored = home(for: match.id).appendingPathComponent("auth.json")
-            if (try? Data(contentsOf: stored)) != data { try? writeAuth(data, to: stored) }
-        } else {
-            let id = UUID().uuidString.lowercased()
-            try? writeAuth(data, to: home(for: id).appendingPathComponent("auth.json"))
-            accounts.append(CodexStoredAccount(id: id, name: "Codex", email: "", accountId: liveId, plan: ""))
-            saveIndex(accounts)
-        }
-    }
+    static func syncLive(into accounts: inout [CodexStoredAccount]) throws { try store.syncLive(into: &accounts) }
 
     // MARK: usage
 
     static func fetch(_ stored: CodexStoredAccount, isActive: Bool) async -> Account {
         let home: URL? = isActive ? nil : home(for: stored.id)
+        let auth = (home ?? liveHome).appendingPathComponent("auth.json")
         do {
+            guard try store.credential(auth)?.accountID == stored.accountId else {
+                throw ShellError.failed("The saved Codex login does not match this account. Sign in again.")
+            }
             let replies = try await CodexAppServer.call(home: home, [
                 .init(method: "account/read", params: ["refreshToken": false]),
                 .init(method: "account/rateLimits/read", params: nil),
             ])
-            return parse(stored, isActive: isActive, account: replies[0]["result"] as? [String: Any],
-                         limits: replies[1]["result"] as? [String: Any],
-                         error: (replies[1]["error"] as? [String: Any])?["message"] as? String)
+            guard try store.credential(auth)?.accountID == stored.accountId else {
+                throw ShellError.failed("Codex changed accounts during the refresh. Refresh again.")
+            }
+            var reading = parse(stored, isActive: isActive, account: replies[0]["result"] as? [String: Any],
+                                limits: replies[1]["result"] as? [String: Any], error: nil)
+            do {
+                if reading.problem == nil, let limits = replies[1]["result"] as? [String: Any] {
+                    if let credits = (limits["rateLimitResetCredits"] as? [String: Any])?["credits"] as? [[String: Any]] {
+                        try store.locked { try ResetOperations.reconcile(resetOperationFile(stored), credits: credits) }
+                    }
+                }
+                reading.pendingResetID = try ResetOperations.pendingCredit(resetOperationFile(stored))
+            } catch { reading.resetProblem = "The saved reset status could not be read. Repair account storage before using another credit." }
+            return reading
         } catch {
-            return parse(stored, isActive: isActive, account: nil, limits: nil, error: error.localizedDescription)
+            return parse(stored, isActive: isActive, account: nil, limits: nil, error: ContextRedaction.clean(error.localizedDescription))
         }
     }
 
@@ -108,78 +83,74 @@ enum CodexService {
                       limits: [String: Any]?, error: String?) -> Account {
         let info = account?["account"] as? [String: Any]
         let email = info?["email"] as? String ?? stored.email
-        let plan = (info?["planType"] as? String ?? stored.plan)
-
-        var windows: [UsageWindow] = []
-        var credits: String?
-        var reached = false
-        var seen = Set<String>()
-
-        func add(_ snapshot: [String: Any], prefix: String?) {
-            for key in ["primary", "secondary"] {
-                guard let w = snapshot[key] as? [String: Any], let pct = (w["usedPercent"] as? NSNumber)?.doubleValue else { continue }
-                var label = Format.windowLabel(minutes: (w["windowDurationMins"] as? NSNumber)?.intValue)
-                if let prefix { label = "\(prefix) \(label)" }
-                guard seen.insert(label).inserted else { continue }
-                let reset = Format.date(w["resetsAt"])
-                let minutes = (w["windowDurationMins"] as? NSNumber)?.doubleValue ?? 10080
-                let draft = UsageWindow(label: label, pct: pct, resetsAt: reset, expectedPct: nil, projectedExhaustion: nil, willLastToReset: nil)
-                windows.append(UsageWindow(label: label, pct: pct, resetsAt: reset,
-                                           expectedPct: minutes >= 1440 ? Format.expectedPct(for: draft, windowMinutes: minutes) : nil,
-                                           projectedExhaustion: nil, willLastToReset: nil))
-            }
-            if let c = snapshot["credits"] as? [String: Any], c["hasCredits"] as? Bool == true {
-                credits = (c["unlimited"] as? Bool == true) ? "unlimited" : Format.credits(c["balance"] as? String)
-            }
-            if snapshot["rateLimitReachedType"] is String { reached = true }
+        let plan = info?["planType"] as? String ?? stored.plan
+        var problem = error
+        var snapshot: CodexUsageSnapshot?
+        do {
+            guard let limits else { throw ShellError.failed(error ?? "Codex usage is unavailable.") }
+            snapshot = try CodexUsageSnapshot(limits, expectedAccountID: stored.accountId)
+            guard info?["type"] as? String == "chatgpt" else { throw ShellError.failed("Sign in to Codex with ChatGPT to read subscription usage.") }
+        } catch { problem = ContextRedaction.clean(error.localizedDescription) }
+        let windows = snapshot?.windows.map { value -> UsageWindow in
+            let duration = Format.windowLabel(minutes: Int(value.durationMinutes))
+            let label = value.scope.map { "\($0) \(duration)" } ?? duration
+            var window = UsageWindow(label: label, pct: value.used, resetsAt: value.resetsAt,
+                                     expectedPct: nil, projectedExhaustion: nil, willLastToReset: nil,
+                                     windowMinutes: value.durationMinutes)
+            if value.durationMinutes >= 1440 { window = UsageWindow(label: label, pct: value.used, resetsAt: value.resetsAt,
+                expectedPct: Format.expectedPct(for: window, windowMinutes: value.durationMinutes),
+                projectedExhaustion: nil, willLastToReset: nil, windowMinutes: value.durationMinutes) }
+            return window
+        } ?? []
+        var unique: [UsageWindow] = []
+        for window in windows {
+            let label = unique.contains(where: { $0.label == window.label }) ? "Secondary " + window.label : window.label
+            unique.append(UsageWindow(label: label, pct: window.pct, resetsAt: window.resetsAt,
+                                      expectedPct: window.expectedPct, projectedExhaustion: nil, willLastToReset: nil,
+                                      windowMinutes: window.windowMinutes))
         }
-
-        if let main = limits?["rateLimits"] as? [String: Any] { add(main, prefix: nil) }
-        for (key, value) in (limits?["rateLimitsByLimitId"] as? [String: Any]) ?? [:] where key != "codex" {
-            if let snap = value as? [String: Any] {
-                add(snap, prefix: snap["limitName"] as? String ?? key.capitalized)
-            }
-        }
-        if limits?["ordinaryUsageAllowed"] as? Bool == false { reached = true }
-
+        let creditInfo = (limits?["rateLimits"] as? [String: Any])?["credits"] as? [String: Any]
+        let credits = creditInfo?["hasCredits"] as? Bool == true
+            ? (creditInfo?["unlimited"] as? Bool == true ? "unlimited" : Format.credits(creditInfo?["balance"] as? String)) : nil
         let resets = ((limits?["rateLimitResetCredits"] as? [String: Any])?["credits"] as? [[String: Any]] ?? [])
             .filter { ($0["status"] as? String) == "available" }
-            .map { ResetCredit(id: $0["id"] as? String ?? "", title: $0["title"] as? String ?? "Full reset", expiresAt: Format.date($0["expiresAt"])) }
-
-        return Account(
-            id: "codex-\(stored.id)",
-            provider: .codex,
-            slot: nil,
-            name: stored.name,
-            email: email,
-            plan: plan.isEmpty ? "ChatGPT" : "ChatGPT \(plan.capitalized)",
-            isActive: isActive,
-            disabled: false,
-            windows: windows,
-            problem: limits == nil ? (error.map { "Couldn't read usage: \($0)" } ?? "Usage unavailable") : nil,
-            fetchedAt: limits == nil ? nil : .now,
-            credits: credits,
-            resetCredits: resets,
-            limitReached: reached
-        )
+            .compactMap { row -> ResetCredit? in
+                guard let id = row["id"] as? String, !id.isEmpty else { return nil }
+                return ResetCredit(id: id, title: row["title"] as? String ?? "Full reset", expiresAt: Format.date(row["expiresAt"]))
+            }
+        var seenCredits = Set<String>()
+        return Account(id: "codex-\(stored.id)", provider: .codex, slot: nil, name: stored.name,
+                       email: email, plan: plan.isEmpty ? "ChatGPT" : "ChatGPT \(plan.capitalized)",
+                       isActive: isActive, activeIdentityVerified: isActive && info?["type"] as? String == "chatgpt" && limits?["accountId"] as? String == stored.accountId,
+                       disabled: false, windows: unique, problem: problem,
+                       fetchedAt: problem == nil ? .now : nil, stale: problem != nil, credits: credits,
+                       resetCredits: resets.filter { seenCredits.insert($0.id).inserted },
+                       limitReached: snapshot?.reached ?? false, providerAccountID: stored.accountId)
     }
 
     // MARK: actions
 
-    static func switchTo(_ target: CodexStoredAccount, accounts: [CodexStoredAccount]) throws {
-        var all = accounts
-        syncLive(into: &all)
-        let source = home(for: target.id).appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: source) else {
-            throw ShellError.failed("The saved login for \(target.name) is missing. Add the account again.")
+    static func switchTo(_ target: CodexStoredAccount, expectedLiveID: String?) throws {
+        try store.activate(target, expectedLiveID: expectedLiveID)
+    }
+
+    static func verifyDefaultIdentity(_ expected: String) async throws {
+        let replies = try await CodexAppServer.call(home: nil, [
+            .init(method: "account/read", params: ["refreshToken": false]),
+            .init(method: "account/rateLimits/read", params: nil),
+        ])
+        guard let info = (replies[0]["result"] as? [String: Any])?["account"] as? [String: Any],
+              info["type"] as? String == "chatgpt",
+              let limits = replies[1]["result"] as? [String: Any], limits["accountId"] as? String == expected,
+              liveAccountId() == expected else {
+            throw ShellError.failed("The default Codex CLI account could not be verified. Refresh before continuing.")
         }
-        try writeAuth(data, to: liveAuth)
     }
 
     /// Runs `codex login` in a fresh CODEX_HOME. Codex opens the browser for
     /// sign-in and exits once the login lands.
     static func addAccount(existing: [CodexStoredAccount]) async throws -> (CodexStoredAccount, Bool) {
-        ensureStore()
+        try ensureStore()
         let id = UUID().uuidString.lowercased()
         let dir = home(for: id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -207,26 +178,36 @@ enum CodexService {
                                    plan: info?["planType"] as? String ?? ""), true)
     }
 
-    static func remove(_ account: CodexStoredAccount) {
-        try? FileManager.default.removeItem(at: home(for: account.id))
-    }
+    static func remove(_ account: CodexStoredAccount) throws { try store.removeAccount(account) }
+
+    static func resetOperationFile(_ account: CodexStoredAccount) -> URL { home(for: account.id).appendingPathComponent("reset-operation.json") }
 
     static func useResetCredit(_ stored: CodexStoredAccount, isActive: Bool, creditId: String?) async throws -> String {
-        var params: [String: Any] = ["idempotencyKey": UUID().uuidString]
-        if let creditId { params["creditId"] = creditId }
-        let replies = try await CodexAppServer.call(home: isActive ? nil : home(for: stored.id), [
-            .init(method: "account/rateLimitResetCredit/consume", params: params),
-        ])
-        if let error = replies.first?["error"] as? [String: Any] {
-            throw ShellError.failed(error["message"] as? String ?? "Codex refused the reset.")
+        guard let creditId, !creditId.isEmpty else { throw ShellError.failed("Refresh the account to select an available reset credit.") }
+        guard accountId(in: (isActive ? liveHome : home(for: stored.id)).appendingPathComponent("auth.json")) == stored.accountId else {
+            throw ShellError.failed("The Codex account changed. Refresh before using a reset.")
         }
-        let outcome = (replies.first?["result"] as? [String: Any])?["outcome"] as? String ?? ""
-        switch outcome {
-        case "reset": return "Limits reset on \(stored.name)."
-        case "nothingToReset": return "Nothing to reset yet, the credit was kept."
-        case "noCredit": return "No reset credits left."
-        case "alreadyRedeemed": return "That credit was already used."
-        default: return "Reset sent."
+        let file = resetOperationFile(stored)
+        var operation = try store.locked { try ResetOperations.reserve(file, accountID: stored.accountId, creditID: creditId) }
+        do {
+            let replies = try await CodexAppServer.call(home: isActive ? nil : home(for: stored.id), [
+                .init(method: "account/rateLimitResetCredit/consume", params: ["idempotencyKey": operation.key, "creditId": operation.creditID]),
+            ])
+            let outcome = (replies.first?["result"] as? [String: Any])?["outcome"] as? String ?? ""
+            let message: String
+            switch outcome {
+            case "reset": operation.phase = .confirmed; message = "Limits reset on \(stored.name)."
+            case "nothingToReset": operation.phase = .unavailable; message = "Nothing to reset; the credit was kept."
+            case "noCredit": operation.phase = .unavailable; message = "No reset credits left."
+            case "alreadyRedeemed": operation.phase = .confirmed; message = "That credit was already used."
+            default: throw ShellError.failed("Reset result is unknown. Retry the pending reset; a different credit will not be selected.")
+            }
+            try store.locked { try ResetOperations.save(operation, to: file) }
+            return message
+        } catch {
+            operation.phase = ResetOperations.failurePhase(error)
+            try? store.locked { try ResetOperations.save(operation, to: file) }
+            throw error
         }
     }
 
@@ -249,8 +230,8 @@ enum CodexService {
         var items = (try? JSONDecoder().decode([StoredHistory].self, from: Data(contentsOf: historyURL))) ?? []
         items.insert(StoredHistory(from: from, to: to, at: .now, reason: reason), at: 0)
         if let data = try? JSONEncoder().encode(Array(items.prefix(50))) {
-            ensureStore()
-            try? data.write(to: historyURL, options: .atomic)
+            try? ensureStore()
+            try? PrivateFile.write(data, to: historyURL)
         }
     }
 }

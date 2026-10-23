@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The menu bar panel: one quiet table per provider. Every row shows the three
@@ -8,12 +9,24 @@ struct PanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            ScrollView {
             VStack(spacing: 18) {
                 ProviderTable(provider: .claude)
                 ProviderTable(provider: .codex)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 14)
+            }
+            // MenuBarExtra can propose zero height when measuring its panel.
+            // A maximum alone lets ScrollView collapse and hide every account.
+            .frame(height: min(540, max(180, (NSScreen.main?.visibleFrame.height ?? 800) - 160)))
+            if let error = model.persistentError {
+                HStack {
+                    Text(error).font(.system(size: 12)).foregroundStyle(Theme.amber).textSelection(.enabled)
+                    Spacer()
+                    Button("Dismiss") { model.persistentError = nil }.controlSize(.small)
+                }.padding(.horizontal, 16).padding(.bottom, 10)
+            }
             footer
         }
         .frame(width: 720)
@@ -26,6 +39,7 @@ struct PanelView: View {
         HStack(spacing: 10) {
             AppMark(size: 22)
             Text("ZipSwap").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text)
+            Text("Israel time").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
             if let toast = model.toast {
                 Text(toast)
                     .font(.system(size: 11.5))
@@ -34,6 +48,7 @@ struct PanelView: View {
                     .transition(.opacity)
             }
             Spacer()
+            if model.loginTask != nil { Button("Cancel sign-in") { model.cancelLogin() }.controlSize(.small) }
             Menu {
                 Button("Add Current Claude Code Login") { model.addClaudeLogin() }
                 Button(model.addingCodex ? "Waiting for ChatGPT Sign-In…" : "Add Codex Account…") { model.addCodexAccount() }
@@ -46,6 +61,8 @@ struct PanelView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Add Account")
+            .accessibilityLabel("Add account")
+            .disabled(model.coordinator.busy(.claude) || model.coordinator.busy(.codex))
             IconButton(systemName: "arrow.clockwise", help: "Refresh", spinning: model.claudeLoading || model.codexLoading) {
                 Task { await model.refreshAll() }
             }
@@ -120,7 +137,8 @@ struct ProviderTable: View {
     private func rank(_ a: Account, _ next: String?) -> Int { a.isActive ? 0 : a.id == next ? 1 : 2 }
 
     private var columns: [String] {
-        provider == .claude ? ["5-Hour", "Weekly", "Fable"] : ["5-Hour", "Weekly", "Free Resets"]
+        let watched = ClaudeService.watchedModels().map { $0.capitalized }.joined(separator: ", ")
+        return provider == .claude ? ["5-Hour", "Weekly", watched.isEmpty ? "Model" : watched] : ["5-Hour", "Weekly", "Free Resets"]
     }
 
     var body: some View {
@@ -151,6 +169,9 @@ struct ProviderTable: View {
             }
             .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.cardBorder))
+            if !accounts.isEmpty, let error = provider == .claude ? model.claudeError : model.codexError {
+                Text(error).font(.system(size: 11)).foregroundStyle(Theme.amber)
+            }
         }
     }
 
@@ -178,28 +199,36 @@ struct AccountLine: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 10) {
                         NameField(account: account, font: .system(size: 13.5, weight: .semibold))
-                        status
+                        if account.isActive { Tag(text: account.activeIdentityVerified ? "Active" : "Selected · unverified", color: account.activeIdentityVerified ? Theme.mint : Theme.amber) }
                     }
                     Text(account.email.isEmpty ? "No Email Reported" : account.email)
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
                         .textSelection(.enabled)
+                    status
+                    if account.stale {
+                        TimelineView(.everyMinute) { _ in
+                            Text(account.usageFreshness(now: .now))
+                                .font(.system(size: 10)).foregroundStyle(Theme.amber).lineLimit(1)
+                        }
+                    }
                 }
             }
             Spacer(minLength: 8)
+            let asOf = account.stale ? account.fetchedAt : nil
             if account.provider == .claude {
-                LimitCell(window: account.fiveHour)
-                LimitCell(window: account.weekly)
-                LimitCell(window: account.windows.first { $0.label.localizedCaseInsensitiveContains("fable") })
+                LimitCell(window: account.fiveHour, asOf: asOf)
+                LimitCell(window: account.weekly, asOf: asOf)
+                LimitCell(window: account.watchedWindow, asOf: asOf)
             } else {
-                LimitCell(window: account.fiveHour)
-                LimitCell(window: account.weekly ?? account.windows.first)
+                LimitCell(window: account.fiveHour, asOf: asOf)
+                LimitCell(window: account.weekly ?? account.windows.first, asOf: asOf)
                 ResetsCell(account: account)
             }
             ZStack(alignment: .trailing) { Color.clear; trailing }.frame(width: Col.action, height: 30)
         }
-        .frame(height: 50)
+        .frame(minHeight: account.stale ? 78 : 62)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(hovering && !account.isActive ? Theme.hover : .clear)
@@ -208,18 +237,23 @@ struct AccountLine: View {
         .contextMenu { menu }
     }
 
-    @ViewBuilder private var status: some View {
-        if account.isActive {
-            Tag(text: "Active", color: Theme.mint)
+    /// Ticks every minute: "Back 07:59" turns into "Back Fri 07:59" overnight.
+    private var status: some View {
+        TimelineView(.everyMinute) { _ in statusTag }
+    }
+
+    @ViewBuilder private var statusTag: some View {
+        if let problem = account.problem {
+            Tag(text: problem, color: Theme.amber)
+        } else if !account.readingTrusted(at: .now) {
+            Tag(text: "Awaiting provider update", color: Theme.amber)
         } else if account.isBlocked {
             Tag(text: "Limited · Back \(account.backAt.map(Format.backTime) ?? "Soon")", color: Theme.coral)
-        } else if let problem = account.problem {
-            Tag(text: problem, color: Theme.amber)
         } else if isUpNext {
-            Tag(text: "Up Next", color: Theme.blue)
+            Tag(text: "Candidate", color: Theme.blue)
         } else if account.disabled {
             Tag(text: "Skipped by Auto-Switch", color: Theme.faint)
-        } else {
+        } else if !account.isActive {
             Tag(text: "Ready", color: Theme.faint)
         }
     }
@@ -233,12 +267,15 @@ struct AccountLine: View {
     }
 
     @ViewBuilder private var menu: some View {
-        Button("Switch to \(account.title)") { model.activate(account) }.disabled(account.isActive || account.isBlocked)
+        Button("Use for default CLI") { model.activate(account) }
+            .disabled(account.isActive || account.manualSwitchReason() != nil || model.coordinator.busy(account.provider))
         if account.provider == .claude {
+            Button("Repair login") { model.repairClaudeLogin(account) }.disabled(model.coordinator.busy(.claude))
             Button(account.disabled ? "Include in Auto-Switch" : "Skip in Auto-Switch") { model.setInRotation(account, account.disabled) }
         }
-        if !account.resetCredits.isEmpty {
-            Button("Use a Free Reset (\(account.resetCredits.count) Left)") { model.useResetCredit(account) }
+        if !account.resetCredits.isEmpty || account.pendingResetID != nil {
+            Button(account.pendingResetID == nil ? "Use a Free Reset (\(account.resetCredits.count) Left)" : "Retry pending reset") { model.useResetCredit(account) }
+                .disabled(model.coordinator.busy(.codex) || model.busy.contains(account.id) || !account.readingTrusted(at: .now) || account.resetProblem != nil)
         }
         if account.provider == .codex {
             Divider()
@@ -268,19 +305,29 @@ struct Tag: View {
     }
 }
 
-/// One limit: the percentage, a thin bar, and when it resets.
+/// One limit: the percentage, a thin bar, and when it resets. `asOf` marks a
+/// last good reading whose percentage is that old.
 struct LimitCell: View {
     let window: UsageWindow?
+    var asOf: Date? = nil
 
     var body: some View {
+        // The row's data can sit unchanged for hours, so the countdown has to
+        // tick on its own rather than wait for new data to redraw it.
+        TimelineView(.everyMinute) { _ in cell(now: .now) }
+    }
+
+    @ViewBuilder private func cell(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             if let window {
                 Text(Format.pct(window.pct))
                     .font(.system(size: 13, weight: .semibold))
                     .monospacedDigit()
-                    .foregroundStyle(window.pct >= 70 ? Theme.tone(window.pct) : Theme.text)
+                    .foregroundStyle(asOf != nil ? Theme.faint : window.pct >= 70 ? Theme.tone(window.pct) : Theme.text)
                 UsageBar(pct: window.pct, height: 3)
-                Text(resetText(window)).font(Theme.mono(10)).foregroundStyle(Theme.faint).fixedSize()
+                    .opacity(asOf != nil ? 0.4 : 1)
+                Text(resetText(window, now: now))
+                    .font(Theme.mono(10)).foregroundStyle(Theme.faint).fixedSize()
             } else {
                 Text("—").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.faint)
                 Color.clear.frame(height: 3)
@@ -288,13 +335,20 @@ struct LimitCell: View {
             }
         }
         .cellFrame()
-        .help(window.map { "\(Format.pct($0.pct)) used, resets \($0.resetsAt.map(Format.clock) ?? "when used")" } ?? "Not reported")
+        .help(help)
     }
 
-    private func resetText(_ window: UsageWindow) -> String {
+    private var help: String {
+        guard let window else { return "Not reported" }
+        let used = "\(Format.pct(window.pct)) used, resets \(window.resetsAt.map(Format.exactReset) ?? "when used")"
+        guard let asOf else { return used }
+        return "\(used). Last good reading \(Format.ago(asOf)); usage can't be fetched right now."
+    }
+
+    private func resetText(_ window: UsageWindow, now: Date) -> String {
         guard let reset = window.resetsAt else { return "Not Started" }
-        if window.isFull { return "Back \(Format.backTime(reset))" }
-        return Format.short(reset)
+        if window.isFull { return "Back \(Format.backTime(reset, now: now))" }
+        return Format.short(reset, now: now)
     }
 }
 
@@ -308,20 +362,21 @@ struct ResetsCell: View {
                 .font(.system(size: 13, weight: .semibold)).monospacedDigit()
                 .foregroundStyle(account.resetCredits.isEmpty ? Theme.faint : Theme.blue)
             Color.clear.frame(height: 3)
-            if account.resetCredits.isEmpty {
+            if account.resetCredits.isEmpty && account.pendingResetID == nil {
                 Text("None").font(Theme.mono(10)).foregroundStyle(Theme.faint)
             } else {
-                Button("Use One") { confirming = true }
+                Button(account.pendingResetID == nil ? "Use One" : "Retry reset") { confirming = true }
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.blue)
+                    .disabled(AppModel.shared.coordinator.busy(.codex) || AppModel.shared.busy.contains(account.id) || !account.readingTrusted(at: .now) || account.resetProblem != nil)
             }
         }
         .cellFrame()
         .confirmationDialog("Use a Free Reset on \(account.title)?", isPresented: $confirming) {
             Button("Reset Limits Now") { AppModel.shared.useResetCredit(account) }
         } message: {
-            Text("This spends one of \(account.resetCredits.count) free Codex resets and clears the current limits.")
+            Text(account.pendingResetID == nil ? "This spends one of \(account.resetCredits.count) free Codex resets and clears the current limits." : "This retries the previous reset using the same credit and operation ID.")
         }
     }
 }
@@ -358,19 +413,19 @@ struct ResetCreditControl: View {
         HStack(spacing: 6) {
             Text("\(account.resetCredits.count) Free Reset\(account.resetCredits.count == 1 ? "" : "s")")
                 .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.blue)
-            Button("Use One") { confirming = true }
+            Button(account.pendingResetID == nil ? "Use One" : "Retry reset") { confirming = true }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.blue)
                 .padding(.horizontal, 8)
                 .frame(height: 22)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Theme.blue.opacity(0.16)))
-                .disabled(AppModel.shared.busy.contains(account.id))
+                .disabled(AppModel.shared.busy.contains(account.id) || AppModel.shared.coordinator.busy(.codex) || !account.readingTrusted(at: .now) || account.resetProblem != nil)
         }
         .confirmationDialog("Use a Free Reset on \(account.title)?", isPresented: $confirming) {
             Button("Reset Limits Now") { AppModel.shared.useResetCredit(account) }
         } message: {
-            Text("This spends one of \(account.resetCredits.count) free Codex resets and clears the current limits.")
+            Text(account.pendingResetID == nil ? "This spends one of \(account.resetCredits.count) free Codex resets and clears the current limits." : "This retries the previous reset using the same credit and operation ID.")
         }
     }
 }

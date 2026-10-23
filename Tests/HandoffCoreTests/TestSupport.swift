@@ -27,6 +27,7 @@ final class Fixture {
         var settings = HandoffSettings()
         settings.enabled = true
         settings.enabledAt = now.addingTimeInterval(-1)
+        settings.approvedWorkspaces = [HandoffPrivacy.canonicalWorkspace(cwd.path)]
         try store.saveSettings(settings)
         try store.saveUsage(HandoffUsage(checkedAt: now, activePercent: 100, claudeExhausted: true, explanation: "No Claude allowance remains."))
     }

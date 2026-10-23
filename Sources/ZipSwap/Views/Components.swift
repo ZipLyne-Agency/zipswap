@@ -44,7 +44,7 @@ struct Avatar: View {
             .overlay(Text(account.initial).font(.system(size: size * 0.44, weight: .semibold)).foregroundStyle(hue))
             .overlay(alignment: .bottomTrailing) {
                 if account.isActive {
-                    Circle().fill(Theme.mint).frame(width: size * 0.28, height: size * 0.28)
+                    Circle().fill(account.activeIdentityVerified ? Theme.mint : Theme.amber).frame(width: size * 0.28, height: size * 0.28)
                         .overlay(Circle().stroke(Theme.card, lineWidth: 2))
                 }
             }
@@ -52,6 +52,7 @@ struct Avatar: View {
 }
 
 struct Ring: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let pct: Double
     var size: CGFloat = 44
     var line: CGFloat = 4.5
@@ -63,10 +64,10 @@ struct Ring: View {
         ZStack {
             Circle().stroke(Theme.track, lineWidth: line)
             Circle()
-                .trim(from: 0, to: max(0.005, min(pct, 100) / 100))
+                .trim(from: 0, to: UsageGeometry.fraction(pct))
                 .stroke(tone, style: StrokeStyle(lineWidth: line, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.spring(duration: 0.6), value: pct)
+                .animation(reduceMotion ? nil : .spring(duration: 0.6), value: pct)
             Text(label ?? Format.pct(pct))
                 .font(.system(size: size * 0.27, weight: .semibold))
                 .monospacedDigit()
@@ -74,31 +75,41 @@ struct Ring: View {
                 .contentTransition(.numericText())
         }
         .frame(width: size, height: size)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Usage")
+        .accessibilityValue(label ?? Format.pct(pct))
     }
 }
 
 struct UsageBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let pct: Double
     var height: CGFloat = 4
     var pace: Double? = nil
 
     var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Theme.track)
-                Capsule().fill(Theme.tone(pct))
-                    .frame(width: max(height, geo.size.width * min(pct, 100) / 100))
-                    .animation(.spring(duration: 0.6), value: pct)
-                if let pace {
+            Capsule().fill(Theme.track)
+                .overlay(alignment: .leading) {
+                    Capsule().fill(Theme.tone(pct))
+                        .frame(width: max(0, geo.size.width) * UsageGeometry.fraction(pct), height: height)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: pct)
+                }
+                .clipShape(Capsule())
+                .overlay(alignment: .leading) {
+                if let pace, pace.isFinite {
                     RoundedRectangle(cornerRadius: 1)
                         .fill(Theme.text)
                         .frame(width: 2, height: height * 2)
-                        .offset(x: geo.size.width * min(pace, 100) / 100 - 1)
+                        .offset(x: min(max(0, geo.size.width - 2), max(0, geo.size.width * UsageGeometry.fraction(pace) - 1)))
                         .help("Even pace would be \(Format.pct(pace)) by now")
                 }
             }
         }
         .frame(height: height)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Usage")
+        .accessibilityValue(Format.pct(pct))
     }
 }
 
@@ -171,6 +182,7 @@ struct NameField: View {
 }
 
 struct IconButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let systemName: String
     let help: String
     var spinning = false
@@ -182,8 +194,8 @@ struct IconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(hovering ? Theme.text : Theme.muted)
-                .rotationEffect(.degrees(spinning ? 360 : 0))
-                .animation(spinning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: spinning)
+                .rotationEffect(.degrees(spinning && !reduceMotion ? 360 : 0))
+                .animation(reduceMotion ? nil : spinning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: spinning)
                 .frame(width: 28, height: 28)
                 .background(RoundedRectangle(cornerRadius: 7).fill(hovering ? Theme.hover : .clear))
         }
@@ -200,7 +212,7 @@ struct SwitchButton: View {
 
     var body: some View {
         let model = AppModel.shared
-        let busy = model.busy.contains(account.id)
+        let busy = model.busy.contains(account.id) || model.coordinator.busy(account.provider)
         Button {
             model.activate(account)
         } label: {
@@ -214,10 +226,10 @@ struct SwitchButton: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(hovering && !account.isBlocked ? Theme.mint : Color(hex: 0x2E3138)))
         }
         .buttonStyle(.plain)
-        .disabled(account.isBlocked || busy)
+        .disabled(busy || account.manualSwitchReason() != nil)
         .opacity(account.isBlocked ? 0.4 : 1)
         .onHover { hovering = $0 }
-        .help(account.isBlocked ? "At its limit until \(account.backAt.map(Format.clock) ?? "reset")" : "Make \(account.title) the active \(account.provider.title) account")
+        .help(account.manualSwitchReason() ?? "Use \(account.title) for the default \(account.provider.title) CLI")
     }
 }
 
@@ -226,19 +238,11 @@ struct ToggleSwitch: View {
     let label: String
 
     var body: some View {
-        Button {
-            withAnimation(.spring(duration: 0.25)) { isOn.toggle() }
-        } label: {
-            Capsule()
-                .fill(isOn ? Theme.mint : Color(hex: 0x33363D))
-                .frame(width: 34, height: 20)
-                .overlay(alignment: isOn ? .trailing : .leading) {
-                    Circle().fill(Theme.text).frame(width: 16, height: 16).padding(2)
-                }
-        }
-        .buttonStyle(.plain)
+        Toggle(label, isOn: $isOn)
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .labelsHidden()
         .accessibilityLabel(label)
-        .accessibilityValue(isOn ? "on" : "off")
     }
 }
 

@@ -42,7 +42,7 @@ final class Dashboard: NSObject, NSWindowDelegate {
             w.isMovableByWindowBackground = true
             w.backgroundColor = NSColor(srgbRed: 0x13 / 255, green: 0x14 / 255, blue: 0x17 / 255, alpha: 1)
             w.appearance = NSAppearance(named: .darkAqua)
-            w.contentMinSize = NSSize(width: 980, height: 680)
+            w.contentMinSize = NSSize(width: 860, height: 540)
             w.contentViewController = NSHostingController(rootView: DashboardView(initialSelection: handoffs ? "handoffs" : "overview"))
             w.isReleasedWhenClosed = false
             w.delegate = self
@@ -118,7 +118,8 @@ struct MenuBarLabel: View {
         guard let c = model.activeClaude else { return "ZipSwap" }
         let five = c.fiveHour.map { Format.pct($0.pct) } ?? "unknown"
         let week = c.weekly.map { Format.pct($0.pct) } ?? "unknown"
-        return "ZipSwap, \(c.title): 5-hour \(five), weekly \(week)"
+        let label = "ZipSwap, \(c.title): 5-hour \(five), weekly \(week)"
+        return c.stale ? "\(label), last known \(Format.ago(c.fetchedAt))" : label
     }
 
     @MainActor
@@ -147,21 +148,22 @@ struct MenuBarLabel: View {
         return HStack(spacing: 5) {
             SwapGlyph(size: 15, color: flashing ? Theme.mint : glyphColor(base))
             if let claude {
-                number(claude.fiveHour, base: base, flashing: flashing)
+                number(claude.fiveHour, base: base, flashing: flashing, stale: claude.stale)
                 Circle().fill(base.opacity(0.45)).frame(width: 2.5, height: 2.5)
-                number(claude.weekly, base: base, flashing: flashing)
+                number(claude.weekly, base: base, flashing: flashing, stale: claude.stale)
             }
         }
         .padding(.horizontal, 2)
         .frame(height: 18)
     }
 
-    private func number(_ window: UsageWindow?, base: Color, flashing: Bool) -> some View {
+    /// A stale reading is drawn faint so an old number never reads as current.
+    private func number(_ window: UsageWindow?, base: Color, flashing: Bool, stale: Bool) -> some View {
         let pct = window?.pct ?? 0
         return Text(window.map { Format.pct($0.pct) } ?? "–")
             .font(.system(size: 12, weight: .semibold))
             .monospacedDigit()
-            .foregroundStyle(flashing ? Theme.mint : (pct >= 70 ? numberColor(pct) : base))
+            .foregroundStyle(flashing ? Theme.mint : stale ? base.opacity(0.4) : (pct >= 70 ? numberColor(pct) : base))
     }
 
     private func numberColor(_ pct: Double) -> Color {

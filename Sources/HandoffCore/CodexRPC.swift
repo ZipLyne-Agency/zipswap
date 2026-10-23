@@ -1,13 +1,19 @@
 import Foundation
 import Darwin
 
+public struct CodexRPCError: LocalizedError {
+    public let code: Int
+    public let method: String
+    public var rejectedBeforeExecution: Bool { [-32600, -32601, -32602].contains(code) }
+    public var errorDescription: String? { "Codex rejected \(method) (\(code)). Update Codex if this method is unsupported." }
+    public init(code: Int, method: String) { self.code = code; self.method = method }
+}
+
 /// A bounded, sequential stdio client. Notifications are discarded, and no
 /// model turn is started by this client. The bridge creates a private process
 /// group so timeout cleanup cannot affect other Codex sessions.
 public final class CodexRPC {
-    private let process = Process()
-    private let input = Pipe()
-    private let output = Pipe()
+    private let process = OwnedProcess()
     private let condition = NSCondition()
     private var pending = Data()
     private var responses: [Int: [String: Any]] = [:]
@@ -18,21 +24,18 @@ public final class CodexRPC {
     private var closed = false
 
     public init(executable: URL, arguments: [String], environment: [String: String],
-                lifetime: TimeInterval = 75) throws {
+                lifetime: TimeInterval = 75, onStart: ((CodexRPC) -> Void)? = nil) throws {
         signal(SIGPIPE, SIG_IGN)
         deadline = Date().addingTimeInterval(lifetime)
-        process.executableURL = executable
-        process.arguments = arguments
-        process.environment = environment
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        process.output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
             self?.receive(data)
         }
-        process.terminationHandler = { [weak self] _ in
+        process.errors.fileHandleForReading.readabilityHandler = { handle in
+            if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+        }
+        process.onExit = { [weak self] _ in
             guard let self else { return }
             self.condition.lock()
             self.failure = HandoffError.unavailable("Codex closed the handoff connection.")
@@ -40,7 +43,8 @@ public final class CodexRPC {
             self.condition.unlock()
         }
         do {
-            try process.run()
+            try process.start(executable: executable, arguments: arguments, environment: environment, lifetime: lifetime)
+            onStart?(self)
             _ = try call("initialize", params: [
                 "clientInfo": ["name": "zipswap_handoff", "title": "ZipSwap Handoff", "version": "1.0.0"],
                 "capabilities": ["experimentalApi": true],
@@ -71,7 +75,7 @@ public final class CodexRPC {
         }
         if let error = reply["error"] as? [String: Any] {
             let code = error["code"] as? Int ?? 0
-            throw HandoffError.unavailable("Codex rejected \(method) (\(code)). Update Codex if this method is unsupported.")
+            throw CodexRPCError(code: code, method: method)
         }
         guard let result = reply["result"] as? [String: Any] else {
             throw HandoffError.invalid("Codex returned an invalid response to \(method).")
@@ -83,7 +87,7 @@ public final class CodexRPC {
         var data = try JSONSerialization.data(withJSONObject: value)
         guard data.count <= 2_000_000 else { throw HandoffError.invalid("The handoff exceeds Codex's local request limit.") }
         data.append(10)
-        try input.fileHandleForWriting.write(contentsOf: data)
+        try process.input.fileHandleForWriting.write(contentsOf: data)
     }
 
     private func receive(_ data: Data) {
@@ -112,20 +116,23 @@ public final class CodexRPC {
     public func close() {
         guard !closed else { return }
         closed = true
-        try? input.fileHandleForWriting.close()
+        try? process.input.fileHandleForWriting.close()
         let gracefulDeadline = Date().addingTimeInterval(1)
         while process.isRunning && Date() < gracefulDeadline { Thread.sleep(forTimeInterval: 0.02) }
         if process.isRunning {
-            let pid = process.processIdentifier
-            if getpgid(pid) == pid { kill(-pid, SIGTERM) } else { process.terminate() }
+            process.stop()
             let killDeadline = Date().addingTimeInterval(1)
             while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.02) }
-            if process.isRunning {
-                if getpgid(pid) == pid { kill(-pid, SIGKILL) } else { kill(pid, SIGKILL) }
-            }
         }
-        output.fileHandleForReading.readabilityHandler = nil
-        try? output.fileHandleForReading.close()
+        process.closePipes()
+    }
+
+    public func cancel() {
+        condition.lock()
+        failure = CancellationError()
+        condition.broadcast()
+        condition.unlock()
+        process.stop()
     }
 
     deinit { close() }
@@ -137,7 +144,11 @@ public enum HandoffEnvironment {
     public static func subscription(_ base: [String: String]) -> [String: String] {
         var env = base
         for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_ACCESS_TOKEN",
-                    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID"] {
+                    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                    "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                    "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                    "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_ACCOUNT_ID"] {
             env.removeValue(forKey: key)
         }
         return env
