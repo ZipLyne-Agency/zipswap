@@ -40,8 +40,7 @@ final class Dashboard: NSObject, NSWindowDelegate {
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true
-            w.backgroundColor = NSColor(srgbRed: 0x13 / 255, green: 0x14 / 255, blue: 0x17 / 255, alpha: 1)
-            w.appearance = NSAppearance(named: .darkAqua)
+            w.backgroundColor = .windowBackgroundColor
             w.contentMinSize = NSSize(width: 860, height: 540)
             w.contentViewController = NSHostingController(rootView: DashboardView(initialSelection: handoffs ? "handoffs" : "overview"))
             w.isReleasedWhenClosed = false
@@ -104,8 +103,9 @@ final class Updater {
     }
 }
 
-/// The menu bar item: glyph, active Claude account with 5h and weekly use,
-/// then Codex weekly use. Rendered to an image so the numbers can carry color.
+/// The menu bar strip, after OpenUsage: each item is the provider's mark (with
+/// the account's initial when there are several) over a short label and value.
+/// The active Claude account always shows; Codex joins when it runs low but isn't used up.
 struct MenuBarLabel: View {
     let model = AppModel.shared
 
@@ -114,65 +114,91 @@ struct MenuBarLabel: View {
             .accessibilityLabel(accessibility)
     }
 
+    private var items: [UsageLine] {
+        var lines: [UsageLine] = []
+        if let claude = model.activeClaude, let line = tightest(claude) { lines.append(line) }
+        // As in OpenUsage, a used-up limit never takes menu bar room; Priority lists it.
+        if let codex = model.activeCodex, !codex.isBlocked, let line = tightest(codex), line.usedPct >= 70 { lines.append(line) }
+        return lines
+    }
+
+    private func tightest(_ account: Account) -> UsageLine? {
+        account.relevantWindows.map { UsageLine(account: account, window: $0) }.max { $0.usedPct < $1.usedPct }
+    }
+
     private var accessibility: String {
-        guard let c = model.activeClaude else { return "ZipSwap" }
-        let five = c.fiveHour.map { Format.pct($0.pct) } ?? "unknown"
-        let week = c.weekly.map { Format.pct($0.pct) } ?? "unknown"
-        let label = "ZipSwap, \(c.title): 5-hour \(five), weekly \(week)"
-        return c.stale ? "\(label), last known \(Format.ago(c.fetchedAt))" : label
+        let parts = items.map { "\($0.account.title) \($0.title) \(UsageText.amount($0))\($0.account.stale ? ", last known" : "")" }
+        return (["ZipSwap"] + parts).joined(separator: ", ")
     }
 
     @MainActor
     private func render() -> NSImage {
-        let renderer = ImageRenderer(content: content)
+        let renderer = ImageRenderer(content: strip)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
         let image = renderer.nsImage ?? NSImage()
-        // Healthy: a template image the system tints for light or dark menu bars.
-        // Warnings and fresh switches keep their color.
-        image.isTemplate = !needsColor
+        // A template image: the system draws it for light, dark and tinted menu bars.
+        image.isTemplate = true
         return image
     }
 
-    private var worst: Double {
-        let c = model.activeClaude
-        return max(c?.fiveHour?.pct ?? 0, c?.weekly?.pct ?? 0)
-    }
-
-    private var needsColor: Bool { model.isFlashing || worst >= 70 }
-
-    private var content: some View {
-        let flashing = model.isFlashing
-        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let base: Color = needsColor ? (dark ? .white.opacity(0.9) : .black.opacity(0.85)) : .black
-        let claude = model.activeClaude
-        return HStack(spacing: 5) {
-            SwapGlyph(size: 15, color: flashing ? Theme.mint : glyphColor(base))
-            if let claude {
-                number(claude.fiveHour, base: base, flashing: flashing, stale: claude.stale)
-                Circle().fill(base.opacity(0.45)).frame(width: 2.5, height: 2.5)
-                number(claude.weekly, base: base, flashing: flashing, stale: claude.stale)
+    private var strip: some View {
+        HStack(spacing: 9) {
+            if items.isEmpty || model.isFlashing {
+                SwapGlyph(size: 16, color: .black)
+            }
+            ForEach(items) { item in
+                HStack(spacing: 4) {
+                    mark(item)
+                    VStack(alignment: .leading, spacing: -2) {
+                        Text(item.title).font(.system(size: 9, weight: .medium))
+                        Text(UsageText.value(item)).font(.system(size: 11, weight: .bold))
+                    }
+                    .fixedSize()
+                }
+                .opacity(item.account.stale ? 0.45 : 1)
             }
         }
+        .foregroundStyle(.black)
+        .monospacedDigit()
         .padding(.horizontal, 2)
-        .frame(height: 18)
+        .padding(.vertical, 1)
+        .fixedSize()
+        .compositingGroup()
     }
 
-    /// A stale reading is drawn faint so an old number never reads as current.
-    private func number(_ window: UsageWindow?, base: Color, flashing: Bool, stale: Bool) -> some View {
-        let pct = window?.pct ?? 0
-        return Text(window.map { Format.pct($0.pct) } ?? "–")
-            .font(.system(size: 12, weight: .semibold))
-            .monospacedDigit()
-            .foregroundStyle(flashing ? Theme.mint : stale ? base.opacity(0.4) : (pct >= 70 ? numberColor(pct) : base))
+    @ViewBuilder
+    private func mark(_ item: UsageLine) -> some View {
+        let siblings = (item.account.provider == .claude ? model.claude : model.codex).count
+        let glyph = ProviderMark(provider: item.account.provider, size: 16, style: AnyShapeStyle(Color.black))
+        if siblings > 1 {
+            glyph
+                .overlay(alignment: .bottomTrailing) {
+                    AccountBadge(text: item.account.initial).offset(x: 5, y: 2.5)
+                }
+                .compositingGroup()
+                .padding(.trailing, 5)
+                .padding(.vertical, 2.5)
+        } else {
+            glyph
+        }
     }
+}
 
-    private func numberColor(_ pct: Double) -> Color {
-        if pct >= 90 { return Color(hex: 0xFF6B5E) }
-        if pct >= 70 { return Color(hex: 0xE8960C) }
-        return needsColor ? Color.gray : Color.black.opacity(0.6)
-    }
+/// An account's initial, punched out of its menu bar mark (OpenUsage, MIT).
+struct AccountBadge: View {
+    let text: String
 
-    private func glyphColor(_ base: Color) -> Color {
-        worst >= 90 ? Color(hex: 0xFF6B5E) : base
+    var body: some View {
+        ZStack {
+            Capsule().fill(Color.black).padding(-1.25).blendMode(.destinationOut)
+            Capsule().fill(Color.black)
+            Text(text)
+                .font(.system(size: 6.5, weight: .heavy))
+                .padding(.horizontal, 2)
+                .frame(minWidth: 8, minHeight: 8)
+                .foregroundStyle(Color.black)
+                .blendMode(.destinationOut)
+        }
+        .fixedSize()
     }
 }

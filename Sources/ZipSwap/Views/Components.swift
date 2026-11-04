@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
+/// ZipSwap's two-arrow mark.
 struct SwapGlyph: View {
     var size: CGFloat = 16
-    var color: Color = Theme.bg
+    var color: Color = .black
 
     var body: some View {
         Canvas { ctx, canvasSize in
@@ -22,13 +24,34 @@ struct SwapGlyph: View {
     }
 }
 
+/// The app icon's mint tile, kept as the brand mark.
 struct AppMark: View {
     var size: CGFloat = 24
     var body: some View {
         RoundedRectangle(cornerRadius: size * 0.29, style: .continuous)
-            .fill(Theme.mint)
+            .fill(Color(hex: 0x7CE0B5))
             .frame(width: size, height: size)
-            .overlay(SwapGlyph(size: size * 0.62, color: Theme.bg))
+            .overlay(SwapGlyph(size: size * 0.62, color: Color(hex: 0x131417)))
+    }
+}
+
+/// A provider's logo, tinted like text.
+struct ProviderMark: View {
+    let provider: Provider
+    var size: CGFloat = 16
+    var style: AnyShapeStyle = AnyShapeStyle(.secondary)
+
+    var body: some View {
+        Image(provider == .claude ? "ClaudeMark" : "CodexMark")
+            .renderingMode(.template)
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            // The marks fill 80% of their artwork; scale so the drawn shape is `size`.
+            .frame(width: size * 1.25, height: size * 1.25)
+            .frame(width: size, height: size)
+            .foregroundStyle(style)
+            .accessibilityHidden(true)
     }
 }
 
@@ -39,91 +62,195 @@ struct Avatar: View {
     var body: some View {
         let hue = Theme.hue(for: account.id)
         Circle()
-            .fill(hue.opacity(0.15))
+            .fill(hue.opacity(0.16))
             .frame(width: size, height: size)
             .overlay(Text(account.initial).font(.system(size: size * 0.44, weight: .semibold)).foregroundStyle(hue))
             .overlay(alignment: .bottomTrailing) {
                 if account.isActive {
-                    Circle().fill(account.activeIdentityVerified ? Theme.mint : Theme.amber).frame(width: size * 0.28, height: size * 0.28)
-                        .overlay(Circle().stroke(Theme.card, lineWidth: 2))
+                    Circle().fill(account.activeIdentityVerified ? Theme.positive : Theme.amber).frame(width: size * 0.28, height: size * 0.28)
+                        .overlay(Circle().stroke(Theme.bg, lineWidth: 2))
                 }
             }
     }
 }
 
-struct Ring: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let pct: Double
-    var size: CGFloat = 44
-    var line: CGFloat = 4.5
-    var color: Color? = nil
-    var label: String? = nil
+/// A limit as a ring around its provider's mark, as on OpenUsage's Priority tab.
+struct PriorityGauge: View {
+    let fraction: Double
+    let severity: Theme.Severity
+    let provider: Provider
+
+    private static let lineWidth: CGFloat = 3
 
     var body: some View {
-        let tone = color ?? Theme.tone(pct)
         ZStack {
-            Circle().stroke(Theme.track, lineWidth: line)
+            Circle().inset(by: Self.lineWidth / 2).stroke(Theme.track, lineWidth: Self.lineWidth)
             Circle()
-                .trim(from: 0, to: UsageGeometry.fraction(pct))
-                .stroke(tone, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                .inset(by: Self.lineWidth / 2)
+                .trim(from: 0, to: min(1, max(0, fraction)))
+                .stroke(Theme.severityColor(severity), style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(reduceMotion ? nil : .spring(duration: 0.6), value: pct)
-            Text(label ?? Format.pct(pct))
-                .font(.system(size: size * 0.27, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(Theme.text)
-                .contentTransition(.numericText())
+            ProviderMark(provider: provider, size: 15)
         }
-        .frame(width: size, height: size)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Usage")
-        .accessibilityValue(label ?? Format.pct(pct))
+        .frame(width: PanelMetrics.gaugeSide, height: PanelMetrics.gaugeSide)
+        .accessibilityHidden(true)
     }
 }
 
-struct UsageBar: View {
+/// A limit's level as a rounded bar. Drawn as shapes so a copied picture matches the panel.
+struct LevelBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let fill: Double
+    let severity: Theme.Severity
+    var height: CGFloat = 6
+    /// Where usage would be at an even pace, as a fraction of the bar.
+    var pace: Double? = nil
+
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: height / 2, style: .continuous) }
+
+    var body: some View {
+        GeometryReader { proxy in
+            shape.fill(Theme.track)
+                .overlay(alignment: .leading) {
+                    if fill > 0 {
+                        shape.fill(Theme.severityColor(severity))
+                            .frame(width: max(height, (proxy.size.width * min(fill, 1)).rounded()))
+                            .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: fill)
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    if let pace, pace.isFinite {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Theme.text.opacity(0.55))
+                            .frame(width: 2, height: height + 4)
+                            .offset(x: min(max(0, proxy.size.width - 2), max(0, proxy.size.width * min(max(pace, 0), 1) - 1)))
+                    }
+                }
+        }
+        .frame(height: height)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The dashboard's usage bar, coloured by how much is used.
+struct UsageBar: View {
     let pct: Double
     var height: CGFloat = 4
     var pace: Double? = nil
 
     var body: some View {
-        GeometryReader { geo in
-            Capsule().fill(Theme.track)
-                .overlay(alignment: .leading) {
-                    Capsule().fill(Theme.tone(pct))
-                        .frame(width: max(0, geo.size.width) * UsageGeometry.fraction(pct), height: height)
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: pct)
-                }
-                .clipShape(Capsule())
-                .overlay(alignment: .leading) {
-                if let pace, pace.isFinite {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Theme.text)
-                        .frame(width: 2, height: height * 2)
-                        .offset(x: min(max(0, geo.size.width - 2), max(0, geo.size.width * UsageGeometry.fraction(pace) - 1)))
-                        .help("Even pace would be \(Format.pct(pace)) by now")
-                }
-            }
+        // Follows the panel's left/used switch so every bar fills the same way.
+        let left = AppModel.shared.showsUsageLeft
+        let shown = { (value: Double) in UsageGeometry.fraction(left ? 100 - value : value) }
+        LevelBar(fill: shown(pct), severity: Theme.severity(pct), height: height, pace: pace.map(shown))
+            .help(pace.map { "Even pace would be \(Format.pct($0)) used by now" } ?? "")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Usage")
+            .accessibilityValue(UsageText.percent(used: pct) + (left ? " left" : " used"))
+    }
+}
+
+/// Choices on a capsule track, with a thumb that slides to the chosen one.
+struct CapsuleSegments<Value: Hashable>: View {
+    let options: [(value: Value, label: String)]
+    @Binding var selection: Value
+    var height: CGFloat = 28
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var thumb
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options, id: \.value) { segment($0.value, label: $0.label) }
         }
+        .padding(2)
         .frame(height: height)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Usage")
-        .accessibilityValue(Format.pct(pct))
+        .background(Theme.controlFill, in: Capsule())
+    }
+
+    private func segment(_ value: Value, label: String) -> some View {
+        let isSelected = selection == value
+        return Button {
+            withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.15)) { selection = value }
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background {
+                    if isSelected {
+                        Capsule()
+                            .fill(Theme.segmentThumb)
+                            .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
+                            .overlay { Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5) }
+                            .matchedGeometryEffect(id: "thumb", in: thumb)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// A small grey badge, like a plan name.
+struct PlanBadge: View {
+    let text: String
+    var color: Color? = nil
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary))
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 5)
+            .frame(height: 16)
+            .background((color ?? .primary).opacity(color == nil ? 0.08 : 0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+}
+
+/// A short confirmation that floats over the footer.
+struct TransientPill: View {
+    let systemImage: String
+    let text: String
+    var tint: Color = Theme.positive
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage).foregroundStyle(tint)
+            Text(text).lineLimit(1)
+        }
+        .font(.system(size: 12, weight: .medium))
+        .padding(.horizontal, 12)
+        .frame(height: 28)
+        .background(.regularMaterial, in: Capsule())
+        .overlay { Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5) }
+        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+    }
+}
+
+extension View {
+    /// A static grey placeholder in finished geometry, for content that has not arrived yet.
+    func skeleton() -> some View {
+        foregroundStyle(Theme.skeleton).accessibilityHidden(true)
     }
 }
 
 struct Chip: View {
     let text: String
-    var color: Color = Theme.mint
+    var color: Color = Theme.positive
 
     var body: some View {
         Text(text)
             .font(.system(size: 10.5, weight: .semibold))
             .foregroundStyle(color)
+            .lineLimit(1)
             .padding(.horizontal, 8)
             .frame(height: 20)
-            .background(Capsule().fill(color.opacity(0.13)))
+            .background(Capsule().fill(color.opacity(0.14)))
     }
 }
 
@@ -131,6 +258,7 @@ struct Chip: View {
 struct NameField: View {
     let account: Account
     var font: Font = .system(size: 15, weight: .semibold)
+    var color: Color = Theme.text
     @State private var editing = false
     @State private var draft = ""
     @FocusState private var focused: Bool
@@ -142,12 +270,10 @@ struct NameField: View {
                 TextField("Name", text: $draft)
                     .textFieldStyle(.plain)
                     .font(font)
-                    .foregroundStyle(Theme.text)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.sunken))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.mint, lineWidth: 1))
-                    .frame(maxWidth: 200)
+                    .padding(.horizontal, 4)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Theme.controlFill))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.accent, lineWidth: 1))
+                    .frame(maxWidth: 160)
                     .focused($focused)
                     .onSubmit(commit)
                     .onExitCommand { editing = false }
@@ -158,10 +284,10 @@ struct NameField: View {
                     editing = true
                     DispatchQueue.main.async { focused = true }
                 } label: {
-                    HStack(spacing: 5) {
-                        Text(account.title).font(font).foregroundStyle(Theme.text).lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(account.title).font(font).foregroundStyle(color).lineLimit(1)
                         Image(systemName: "pencil")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(Theme.faint)
                             .opacity(hovering ? 1 : 0)
                     }
@@ -169,7 +295,7 @@ struct NameField: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hovering = $0 }
-                .help("Click to Rename")
+                .help("Rename")
             }
         }
     }
@@ -181,55 +307,52 @@ struct NameField: View {
     }
 }
 
-struct IconButton: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// A round icon button, as in OpenUsage's footer.
+struct RoundIconButton: View {
     let systemName: String
     let help: String
-    var spinning = false
     let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(hovering ? Theme.text : Theme.muted)
-                .rotationEffect(.degrees(spinning && !reduceMotion ? 360 : 0))
-                .animation(reduceMotion ? nil : spinning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: spinning)
-                .frame(width: 28, height: 28)
-                .background(RoundedRectangle(cornerRadius: 7).fill(hovering ? Theme.hover : .clear))
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 26, height: 26)
+                .background(Theme.controlFill, in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .help(help)
         .accessibilityLabel(help)
     }
 }
 
+/// Makes an account the default for its CLI.
 struct SwitchButton: View {
     let account: Account
-    @State private var hovering = false
+    var prominent = false
+    var size: ControlSize = .small
 
     var body: some View {
         let model = AppModel.shared
         let busy = model.busy.contains(account.id) || model.coordinator.busy(account.provider)
-        Button {
-            model.activate(account)
-        } label: {
-            Group {
-                if busy { ProgressView().controlSize(.mini) } else { Text("Switch") }
+        Group {
+            if prominent {
+                Button { model.activate(account) } label: { label(busy) }.buttonStyle(.borderedProminent)
+            } else {
+                Button { model.activate(account) } label: { label(busy) }.buttonStyle(.bordered)
             }
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(hovering && !account.isBlocked ? Theme.bg : Theme.text)
-            .frame(width: 64, height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(hovering && !account.isBlocked ? Theme.mint : Color(hex: 0x1F2126)))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(hovering && !account.isBlocked ? Theme.mint : Color(hex: 0x2E3138)))
         }
-        .buttonStyle(.plain)
+        .controlSize(size)
         .disabled(busy || account.manualSwitchReason() != nil)
-        .opacity(account.isBlocked ? 0.4 : 1)
-        .onHover { hovering = $0 }
         .help(account.manualSwitchReason() ?? "Use \(account.title) for the default \(account.provider.title) CLI")
+    }
+
+    private func label(_ busy: Bool) -> some View {
+        ZStack {
+            Text("Switch").opacity(busy ? 0 : 1)
+            if busy { ProgressView().controlSize(.mini) }
+        }
     }
 }
 
@@ -258,13 +381,12 @@ struct Lever: View {
                 ToggleSwitch(isOn: $isOn, label: title)
                 Text(title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.text2)
                 Spacer()
-                Text(isOn ? Format.pct(value) : "off")
+                Text(isOn ? Format.pct(value) : "Off")
                     .font(Theme.mono(14, .semibold))
                     .foregroundStyle(isOn ? Theme.text : Theme.faint)
                     .contentTransition(.numericText())
             }
             Slider(value: $value, in: 50...99, step: 1)
-                .tint(Theme.mint)
                 .controlSize(.small)
                 .disabled(!isOn)
                 .accessibilityLabel("\(title) threshold")
@@ -283,7 +405,32 @@ struct SectionLabel: View {
     let text: String
     var body: some View {
         Text(text)
-            .font(.system(size: 11.5, weight: .semibold))
-            .foregroundStyle(Theme.faint)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// Copies a view to the clipboard as a PNG.
+@MainActor
+enum ShareImage {
+    static let scale: CGFloat = 3
+
+    static func png<Content: View>(_ view: Content) -> Data? {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = scale
+        guard let cgImage = renderer.cgImage else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        rep.size = NSSize(width: CGFloat(cgImage.width) / scale, height: CGFloat(cgImage.height) / scale)
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    @discardableResult
+    static func copy<Content: View>(_ view: Content) -> Bool {
+        guard let png = png(view) else { NSSound.beep(); return false }
+        let board = NSPasteboard.general
+        board.clearContents()
+        guard board.setData(png, forType: .png) else { NSSound.beep(); return false }
+        return true
     }
 }

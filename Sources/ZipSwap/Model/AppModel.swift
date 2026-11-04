@@ -24,6 +24,9 @@ final class AppModel {
     var flashUntil: Date?
     var lastClaudeRefresh: Date?
     var lastCodexRefresh: Date?
+    /// When each refresh last started, success or not: the panel counts down from these.
+    var claudeRefreshStarted: Date?
+    var codexRefreshStarted: Date?
     var addingCodex = false
     var runtimeTools: [RuntimeTool] = []
     var claudeIdentityReady = false
@@ -39,6 +42,10 @@ final class AppModel {
         }
     }
     var codexAutoOn: Bool { didSet { save("codexAutoOn", codexAutoOn) } }
+    /// The panel shows what's left of each limit (OpenUsage's default) or what's used.
+    var showsUsageLeft: Bool { didSet { save("showsUsageLeft", showsUsageLeft) } }
+    /// Resets read as a clock time instead of a countdown.
+    var showsResetClock: Bool { didSet { save("showsResetClock", showsResetClock) } }
     private var codexThresholdValue: Double = 90
     var codexThreshold: Double {
         get { codexThresholdValue }
@@ -79,7 +86,10 @@ final class AppModel {
 
     private init() {
         let d = UserDefaults.standard
-        d.register(defaults: ["claudeAutoOn": true, "claudeThreshold": 95.0, "codexAutoOn": true, "codexThreshold": 90.0])
+        d.register(defaults: ["claudeAutoOn": true, "claudeThreshold": 95.0, "codexAutoOn": true, "codexThreshold": 90.0,
+                              "showsUsageLeft": true, "showsResetClock": false])
+        showsUsageLeft = d.bool(forKey: "showsUsageLeft")
+        showsResetClock = d.bool(forKey: "showsResetClock")
         claudeAutoOn = d.bool(forKey: "claudeAutoOn")
         claudeThresholdValue = RotationSettings.threshold(d.double(forKey: "claudeThreshold"), fallback: 95)
         codexAutoOn = d.bool(forKey: "codexAutoOn")
@@ -160,6 +170,7 @@ final class AppModel {
             return
         }
         claudeLoading = true
+        claudeRefreshStarted = .now
         let generation = coordinator.generation(.claude)
         defer {
             claudeLoading = false
@@ -190,6 +201,7 @@ final class AppModel {
         rebuildHistory()
         if !coordinator.busy(.claude) { applyClaudeAuto() }
         HandoffController.shared.publishUsage()
+        checkLowLimit(.claude)
     }
 
     func refreshCodex() async {
@@ -200,6 +212,7 @@ final class AppModel {
             return
         }
         codexLoading = true
+        codexRefreshStarted = .now
         defer { codexLoading = false }
         let generation = coordinator.generation(.codex)
         do { try CodexService.syncLive(into: &stored) }
@@ -239,7 +252,7 @@ final class AppModel {
         codexPoll = codexPoll.filter { ids.contains($0.key) }
         if let data = try? JSONEncoder().encode(codexPoll) { UserDefaults.standard.set(data, forKey: "codexPoll.v1") }
         let results = stored.map { item in
-            values["codex-\(item.id)"] ?? CodexService.parse(item, isActive: item.accountId == liveId, account: nil, limits: nil, error: "Waiting for a usage refresh")
+            values["codex-\(item.id)"] ?? CodexService.parse(item, isActive: item.accountId == liveId, account: nil, limits: nil, error: Account.awaitingFirstReading)
         }
         // Learn emails and plans the first time we see them.
         var changed = false
@@ -261,10 +274,23 @@ final class AppModel {
             if let s = stored.first(where: { "codex-\($0.id)" == acc.id }) { a.name = s.name }
             return a
         }
-        codexError = codex.contains(where: { $0.problem != nil }) ? "Some Codex readings are unavailable. Select an account for details." : nil
+        codexError = codex.contains(where: { $0.problem != nil && !$0.awaitingFirstReading }) ? "Some Codex readings are unavailable. Select an account for details." : nil
         if refreshed.contains(where: { $0.problem == nil }) { lastCodexRefresh = .now }
         rebuildHistory()
         await evaluateCodexAuto()
+        checkLowLimit(.codex)
+    }
+
+    /// Warns once per limit window when the account in use is nearly out and
+    /// auto-switch has nowhere to go.
+    private func checkLowLimit(_ provider: Provider) {
+        let active = provider == .claude ? activeClaude : activeCodex
+        let auto = provider == .claude ? claudeAutoOn : codexAutoOn
+        guard let alert = LowLimitAlert.alert(active: active, upNext: upNext(provider), autoSwitchOn: auto) else { return }
+        let key = "lowLimitAlert.\(provider.rawValue)"
+        guard UserDefaults.standard.string(forKey: key) != alert.key else { return }
+        UserDefaults.standard.set(alert.key, forKey: key)
+        notify(alert.title, body: alert.body)
     }
 
     private func rebuildHistory() {

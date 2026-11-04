@@ -30,6 +30,9 @@ struct ResetCredit: Identifiable, Hashable {
 }
 
 struct Account: Identifiable, Hashable {
+    /// The placeholder problem of an account that hasn't been polled yet.
+    static let awaitingFirstReading = "Waiting for a usage refresh"
+
     let id: String
     let provider: Provider
     /// Claude slot number; nil for Codex.
@@ -101,6 +104,9 @@ struct Account: Identifiable, Hashable {
         if isBlocked { return "At its usage limit" }
         return nil
     }
+
+    /// Saved but not polled yet: a pending state, not a failure.
+    var awaitingFirstReading: Bool { problem == Account.awaitingFirstReading && windows.isEmpty }
 
     var usageDisplay: String { relevantWindows.isEmpty ? "Unknown" : Format.pct(tightest) }
     var watchedWindow: UsageWindow? { relevantWindows.filter { $0.label != "5h" && $0.label != "Week" }.max { $0.pct < $1.pct } }

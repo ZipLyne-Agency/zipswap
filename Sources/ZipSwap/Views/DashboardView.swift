@@ -33,7 +33,6 @@ struct DashboardView: View {
             }
         }
         .background(Theme.bg)
-        .preferredColorScheme(.dark)
         .frame(minWidth: 860, minHeight: 540)
         .onAppear { model.panelOpened() }
         .onReceive(NotificationCenter.default.publisher(for: .showHandoffs)) { _ in selection = "handoffs" }
@@ -105,7 +104,7 @@ struct SidebarItem: View {
             .foregroundStyle(selected ? Theme.text : Theme.text2)
             .padding(.vertical, 7)
             .padding(.horizontal, 6)
-            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? Color(hex: 0x1E2025) : .clear))
+            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? Theme.selected : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -125,11 +124,11 @@ struct SidebarAccount: View {
                     Text(account.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
                     UsageBar(pct: account.tightest, height: 3)
                 }
-                Text(account.usageDisplay).font(Theme.mono(10.5)).foregroundStyle(Theme.muted).frame(width: 36, alignment: .trailing)
+                Text(account.relevantWindows.isEmpty ? "—" : UsageText.percent(used: account.tightest)).font(Theme.mono(10.5)).foregroundStyle(Theme.muted).lineLimit(1).fixedSize().frame(minWidth: 36, alignment: .trailing)
             }
             .padding(.vertical, 7)
             .padding(.horizontal, 6)
-            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? Color(hex: 0x1E2025) : .clear))
+            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? Theme.selected : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -166,8 +165,8 @@ struct AccountDetail: View {
                             model.activate(account)
                         } label: {
                             Text("Switch to \(account.title)").font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Theme.bg).padding(.horizontal, 14).frame(height: 34)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mint))
+                                .foregroundStyle(Theme.onAccent).padding(.horizontal, 14).frame(height: 34)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
                         }
                         .buttonStyle(.plain)
                         .disabled(model.coordinator.busy(account.provider) || account.manualSwitchReason() != nil)
@@ -253,10 +252,13 @@ struct WindowCard: View {
                 Text(window.resetsAt.map(Format.resetClock) ?? "Not Started").font(Theme.mono(11)).foregroundStyle(Theme.faint)
                     .help(window.resetsAt.map(Format.exactReset) ?? "No reset deadline reported")
             }
-            Text(Format.pct(window.pct)).font(.system(size: 34, weight: .semibold)).monospacedDigit().foregroundStyle(stale ? Theme.faint : Theme.text)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(UsageText.percent(used: window.pct)).font(.system(size: 34, weight: .semibold)).monospacedDigit().foregroundStyle(stale ? Theme.faint : Theme.text)
+                Text(UsageText.left ? "left" : "used").font(.system(size: 13)).foregroundStyle(Theme.muted)
+            }
             UsageBar(pct: window.pct, height: 8, pace: window.expectedPct)
             HStack {
-                Text(window.expectedPct.map { "even pace: \(Format.pct($0))" } ?? "rolling window")
+                Text(window.expectedPct.map { "even pace: \(Format.pct($0)) used" } ?? "rolling window")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted)
                 Spacer()
                 TimelineView(.everyMinute) { _ in
@@ -358,11 +360,11 @@ struct OverviewDetail: View {
                     }
                     Text("Claude auto-switch: \(model.claudeEngineStatus)").font(.system(size: 12)).foregroundStyle(Theme.muted)
                     if model.claudeAutoOn && !model.claudeEngineRunning && !model.legacyRunning {
-                        Button("Retry auto-switch") { model.engine.retry(); model.applyClaudeAuto() }
+                        Button("Retry Auto-Switch") { model.engine.retry(); model.applyClaudeAuto() }.controlSize(.small)
                     }
-                    Button("Export diagnostics") { model.exportDiagnostics() }
-                    if model.codexError != nil { Button("Restore account-list backup") { model.restoreCodexIndex() } }
-                    if model.codexError != nil { Button("Recover saved logins") { model.recoverSavedLogins() } }
+                    Button("Export Diagnostics") { model.exportDiagnostics() }.controlSize(.small)
+                    if model.codexError != nil { Button("Restore Account List Backup") { model.restoreCodexIndex() }.controlSize(.small) }
+                    if model.codexError != nil { Button("Recover Saved Logins") { model.recoverSavedLogins() }.controlSize(.small) }
                     ForEach(model.runtimeTools) { tool in
                         HStack {
                             Text(tool.name).font(.system(size: 12)).foregroundStyle(Theme.text2)
@@ -371,7 +373,7 @@ struct OverviewDetail: View {
                         }
                         if let issue = tool.issue { Text(issue).font(.system(size: 12)).foregroundStyle(Theme.amber) }
                     }
-                    Button("Check tools") { Task { await model.checkTools(); await model.refreshAll() } }
+                    Button("Check Tools") { Task { await model.checkTools(); await model.refreshAll() } }.controlSize(.small)
                     Text(Bundle.main.infoDictionary?["ZipSwapSourceRevision"] as? String ?? "Local source revision unrecorded")
                         .font(Theme.mono(10)).foregroundStyle(Theme.muted).textSelection(.enabled)
                     if model.legacyRunning {

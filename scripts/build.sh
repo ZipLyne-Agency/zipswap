@@ -5,7 +5,9 @@
 #   scripts/build.sh            build only
 #   scripts/build.sh --install  build, then replace ~/Applications/ZipSwap.app
 # MARKETING_VERSION and CURRENT_PROJECT_VERSION in the environment override
-# the versions in project.yml (scripts/release.sh and CI set them).
+# the versions in project.yml (scripts/release.sh and CI set them). Without
+# them, a build takes the number the next release would get (commit count + 1),
+# so Sparkle doesn't replace a local install with an older published release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export ZIPSWAP_BUILD_DIR="${ZIPSWAP_BUILD_DIR:-${RUNNER_TEMP:-$HOME/Assets/ZipSwap/temporary}/build}"
@@ -16,6 +18,11 @@ xcodegen generate --quiet
 
 IDENTITY="Developer ID Application: ZipLyne LLC (DHGG5BA7J7)"
 OVERRIDES=()
+if [ -z "${MARKETING_VERSION:-}" ] && [ -z "${CURRENT_PROJECT_VERSION:-}" ] && NEXT=$(git rev-list --count HEAD 2>/dev/null); then
+  NEXT=$((NEXT + 1))
+  MARKETING_VERSION="1.0.$NEXT"
+  CURRENT_PROJECT_VERSION="$NEXT"
+fi
 [ -n "${MARKETING_VERSION:-}" ] && OVERRIDES+=("MARKETING_VERSION=$MARKETING_VERSION")
 [ -n "${CURRENT_PROJECT_VERSION:-}" ] && OVERRIDES+=("CURRENT_PROJECT_VERSION=$CURRENT_PROJECT_VERSION")
 if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then

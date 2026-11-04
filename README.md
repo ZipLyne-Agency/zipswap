@@ -13,6 +13,33 @@ Codex accounts are kept by ZipSwap: each saved account has its own folder under
 that file into `~/.codex/auth.json`, and usage, resets and credits come from
 `codex app-server`.
 
+## The panel
+
+Click the menu bar item to open the panel. It follows the system's light or
+dark appearance and has two tabs.
+
+- **Priority** shows the limit closest to running out on each account in use,
+  the account auto-switch picks next (with **Switch**), other accounts' limits
+  with 30% or less left, used-up accounts and when they're back, and accounts
+  that need a repaired login (**Fix**).
+- **All Usage** shows every account's Session, Weekly and watched-model limits,
+  plus Codex free resets (**Use**).
+
+Click any amount to flip between left and used, and any reset to flip between a
+countdown and a clock time; the ⋯ menu has the same two switches. **Next update
+in …** counts down to the next refresh; click it or press ⌘R to refresh now.
+The copy button puts a picture of the current tab on the clipboard. Right-click
+an account for Repair Login, Skip in Auto-Switch and the rest.
+
+The menu bar shows the active Claude account's tightest limit, and the active
+Codex account's when it has 30% or less left and isn't used up. With several accounts, the mark
+carries the account's initial. When the account in use reaches 90% and
+auto-switch has nowhere to go, ZipSwap sends one notification for that limit
+window.
+
+The design follows [OpenUsage](https://github.com/robinebers/openusage) (MIT);
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Build and install
 
 ```sh
