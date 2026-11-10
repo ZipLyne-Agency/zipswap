@@ -49,3 +49,45 @@ enum ClaudeLoginRepair {
         }
     }
 }
+
+extension ClaudeLoginRepair {
+    /// Signs a brand-new Claude account in through the browser, in its own
+    /// throwaway profile, then saves it with the helper. The default CLI login
+    /// is verified before and after, so adding an account never switches it.
+    static func addNew() async throws -> String {
+        let before = try await ClaudeService.list()
+        let original = before.first(where: \.isActive)
+        if let original {
+            try await ClaudeService.verifyDefaultIdentity(email: original.email, organizationID: original.organizationID)
+        }
+        let profile = Shell.home.appendingPathComponent("Library/Application Support/ZipSwap/ClaudeLogins/new-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: profile) }
+        let environment = ["CLAUDE_CONFIG_DIR": profile.path, "CLAUDE_SECURESTORAGE_CONFIG_DIR": profile.path]
+        let login = try await Shell.run("claude", ["auth", "login", "--claudeai"], env: environment, timeout: 600)
+        guard login.status == 0 else { throw ShellError.failed("Sign-in did not finish. Choose Add Claude Account to retry.") }
+        try Task.checkCancellation()
+        let identity = try await ClaudeService.defaultIdentity(env: environment)
+        let capture: Result<ShellResult, Error>
+        do { capture = .success(try await Shell.run(ClaudeService.tool, ["add"], env: environment, timeout: 90)) }
+        catch { capture = .failure(error) }
+        // Capture moves the helper's active marker to the new account; put it
+        // back by re-capturing the real default login. Cancellation cannot skip this.
+        if let original {
+            try await Task.detached {
+                let result = try await Shell.run(ClaudeService.tool, ["add"], timeout: 90)
+                guard result.status == 0 else { throw ShellError.failed("The account was saved, but the default login needs reconciliation. Choose Add Current Claude Code Login.") }
+                try await ClaudeService.verifyDefaultIdentity(email: original.email, organizationID: original.organizationID)
+            }.value
+        }
+        guard try capture.get().status == 0 else { throw ShellError.failed("The helper could not save this login. Try again.") }
+        let after = try await ClaudeService.list()
+        guard after.contains(where: { $0.email.caseInsensitiveCompare(identity.email) == .orderedSame }) else {
+            throw ShellError.failed("The new account could not be verified in the saved list.")
+        }
+        if let original, after.first(where: \.isActive)?.email.caseInsensitiveCompare(original.email) != .orderedSame {
+            throw ShellError.failed("The previous default account was not retained. Refresh the account list.")
+        }
+        return identity.email
+    }
+}

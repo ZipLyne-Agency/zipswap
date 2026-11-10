@@ -50,8 +50,9 @@ struct PanelView: View {
             .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
             footer
         }
-        .frame(width: PanelMetrics.width)
+        .frame(width: PanelMetrics.width(for: tab, accounts: model.claude.count + model.codex.count))
         .background(Theme.bg)
+        .animation(.snappy(duration: 0.2), value: tab)
         .onAppear { model.panelOpened() }
     }
 
@@ -133,6 +134,8 @@ struct PanelView: View {
 
     private var optionsMenu: some View {
         Menu {
+            Button(model.loginTask != nil ? "Waiting for Claude Sign-In…" : "Add Claude Account…") { model.addClaudeAccount() }
+                .disabled(model.loginTask != nil || model.coordinator.busy(.claude))
             Button("Add Current Claude Code Login") { model.addClaudeLogin() }
                 .disabled(model.coordinator.busy(.claude))
             Button(model.addingCodex ? "Waiting for ChatGPT Sign-In…" : "Add Codex Account…") { model.addCodexAccount() }
@@ -218,7 +221,7 @@ struct ShareCard: View {
             .padding(.horizontal, 4)
         }
         .padding(16)
-        .frame(width: PanelMetrics.width, alignment: .topLeading)
+        .frame(width: PanelMetrics.width(for: tab, accounts: AppModel.shared.claude.count + AppModel.shared.codex.count) + 32, alignment: .topLeading)
         .background(Theme.bg)
         .environment(\.isSnapshot, true)
     }
@@ -468,7 +471,7 @@ struct PriorityList: View {
             }
             if !isSnapshot {
                 HStack(spacing: 8) {
-                    Button("Add Claude Code Login") { model.addClaudeLogin() }
+                    Button("Add Claude Account") { model.addClaudeAccount() }
                     Button("Add Codex Account") { model.addCodexAccount() }
                 }
                 .controlSize(.small)
@@ -521,16 +524,21 @@ struct AllUsageList: View {
     let model = AppModel.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(Provider.allCases) { provider in
-                let accounts = ordered(provider)
-                let error = provider == .claude ? model.claudeError : model.codexError
-                if !accounts.isEmpty || error != nil {
-                    ProviderCard(provider: provider, accounts: accounts, error: error, now: now)
-                }
+        let cards = Provider.allCases.flatMap { ordered($0) }
+        let columns = PanelMetrics.columns(accounts: cards.count)
+        VStack(alignment: .leading, spacing: PanelMetrics.cardGap) {
+            ForEach([model.claudeError, model.codexError].compactMap { $0 }, id: \.self) { error in
+                Text(error).font(.system(size: 11)).foregroundStyle(Theme.amber).padding(.horizontal, 4)
             }
-            if model.claude.isEmpty && model.codex.isEmpty && model.claudeError == nil && model.codexError == nil {
-                PriorityList(now: now)
+            if cards.isEmpty {
+                if model.claudeError == nil && model.codexError == nil { PriorityList(now: now) }
+            } else {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: PanelMetrics.cardGap, alignment: .top), count: columns),
+                    alignment: .leading, spacing: PanelMetrics.cardGap
+                ) {
+                    ForEach(cards) { AccountCard(account: $0, now: now) }
+                }
             }
         }
     }
@@ -541,6 +549,20 @@ struct AllUsageList: View {
         let next = model.upNext(provider)?.id
         func rank(_ a: Account) -> Int { a.isActive ? 0 : a.id == next ? 1 : 2 }
         return list.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+    }
+}
+
+/// One account in the All Usage grid: its own card, with the provider's mark.
+struct AccountCard: View {
+    let account: Account
+    let now: Date
+
+    var body: some View {
+        AccountBlock(account: account, now: now)
+            .padding(.horizontal, PanelMetrics.cardPadding)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .cardSurface()
     }
 }
 

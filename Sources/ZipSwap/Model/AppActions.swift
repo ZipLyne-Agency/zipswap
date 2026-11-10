@@ -107,6 +107,23 @@ extension AppModel {
         }
     }
 
+    func addClaudeAccount() {
+        guard loginTask == nil else { return }
+        loginTask = Task {
+            defer { loginTask = nil; applyClaudeAuto() }
+            do {
+                let token = try coordinator.begin(.claude, accountID: "new")
+                defer { coordinator.finish(token) }
+                try await engine.pause()
+                show("Finish signing in to the new Claude account in your browser")
+                let email = try await ClaudeLoginRepair.addNew()
+                show("Added \(email)")
+                await refreshClaude()
+            } catch is CancellationError { show("Sign-in cancelled") }
+            catch { showError(error.localizedDescription) }
+        }
+    }
+
     func repairClaudeLogin(_ account: Account) {
         guard account.provider == .claude, let slot = account.slot, loginTask == nil else { return }
         loginTask = Task {

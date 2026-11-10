@@ -95,6 +95,18 @@ enum PanelMetrics {
     static let valueWidth: CGFloat = 40
     static let resetWidth: CGFloat = 60
     static let gaugeSide: CGFloat = 32
+    static let cardWidth: CGFloat = 320
+    static let cardGap: CGFloat = 12
+    static let maxColumns = 3
+
+    /// All Usage lays accounts out side by side so none are cut off or hidden
+    /// behind a scroll; the panel widens by one card per column.
+    static func columns(accounts: Int) -> Int { min(maxColumns, max(1, accounts)) }
+    static func width(for tab: PanelTab, accounts: Int) -> CGFloat {
+        guard tab == .allUsage else { return width }
+        let n = CGFloat(columns(accounts: accounts))
+        return max(width, n * cardWidth + (n - 1) * cardGap + 2 * margin)
+    }
 }
 
 extension View {
