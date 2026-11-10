@@ -23,7 +23,9 @@ dark appearance and has two tabs.
   with 30% or less left, used-up accounts and when they're back, and accounts
   that need a repaired login (**Fix**).
 - **All Usage** shows every account's Session, Weekly and watched-model limits,
-  plus Codex free resets (**Use**).
+  plus Codex free resets (**Use**). A Claude account at its limit gets a **Check**
+  link to Settings > Usage on claude.ai, the only place Claude shows and spends
+  its free resets; sign in there as that account.
 
 Click any amount to flip between left and used, and any reset to flip between a
 countdown and a clock time; the ⋯ menu has the same two switches. **Next update

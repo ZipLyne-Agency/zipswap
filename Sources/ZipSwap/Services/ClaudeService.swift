@@ -12,6 +12,10 @@ enum ClaudeService {
 
     static var isInstalled: Bool { Shell.which(tool) != nil }
 
+    /// Claude's free resets can be seen and used only on claude.ai and in Claude
+    /// Desktop: the usage API reports them as ineligible to any other client.
+    static let usagePage = URL(string: "https://claude.ai/settings/usage")!
+
     static func list() async throws -> [Account] {
         let result = try await Shell.run(tool, ["list", "--json"], timeout: 90)
         return try decode(result)

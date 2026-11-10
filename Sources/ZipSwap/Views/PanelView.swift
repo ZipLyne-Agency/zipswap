@@ -629,6 +629,9 @@ struct AccountBlock: View {
             if account.provider == .codex && (!account.resetCredits.isEmpty || account.pendingResetID != nil) {
                 FreeResetsRow(account: account)
             }
+            if account.provider == .claude && account.isBlocked && !isSnapshot {
+                ClaudeResetsRow(account: account)
+            }
         }
         .contentShape(Rectangle())
         .contextMenu { AccountMenu(account: account) }
@@ -757,6 +760,24 @@ struct FreeResetsRow: View {
     }
 }
 
+/// A used-up Claude account's way to a free reset. Claude only shows and spends
+/// them on claude.ai, so this opens that page for the account's own sign-in.
+struct ClaudeResetsRow: View {
+    let account: Account
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Free Resets").lineLimit(1)
+            Spacer(minLength: 0)
+            Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                .buttonStyle(.link)
+                .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
+        }
+        .font(.system(size: 12))
+        .frame(height: PanelMetrics.rowHeight)
+    }
+}
+
 /// An account's right-click menu, the same wherever the account shows.
 struct AccountMenu: View {
     let account: Account
@@ -768,6 +789,7 @@ struct AccountMenu: View {
         if account.provider == .claude {
             Button("Repair Login") { model.repairClaudeLogin(account) }.disabled(model.coordinator.busy(.claude))
             Button(account.disabled ? "Include in Auto-Switch" : "Skip in Auto-Switch") { model.setInRotation(account, account.disabled) }
+            Button("Check Free Resets on claude.ai") { NSWorkspace.shared.open(ClaudeService.usagePage) }
         }
         if !account.resetCredits.isEmpty || account.pendingResetID != nil {
             Button(account.pendingResetID == nil ? "Use a Free Reset (\(account.resetCredits.count) Left)" : "Retry Pending Reset") { model.useResetCredit(account) }

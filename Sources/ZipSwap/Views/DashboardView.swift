@@ -231,6 +231,20 @@ struct AccountDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardStyle()
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Free Resets").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+                            Spacer()
+                            Button("Open Claude Usage") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                                .controlSize(.small)
+                        }
+                        Text("Shown only on claude.ai. Sign in as \(account.email).")
+                            .font(.system(size: 12.5)).foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .cardStyle()
                 }
             }
             Spacer()
