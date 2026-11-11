@@ -23,7 +23,9 @@ dark appearance and has two tabs.
   with 30% or less left, used-up accounts and when they're back, and accounts
   that need a repaired login (**Fix**).
 - **All Usage** shows every account's Session, Weekly and watched-model limits,
-  plus Codex free resets (**Use**). A Claude account at its limit gets a **Check**
+  plus Codex free resets (**Use**). **Next** marks the account auto-switch
+  moves to next, the same one listed under Up Next on Priority; when none
+  qualifies, Up Next says so. A Claude account at its limit gets a **Check**
   link to Settings > Usage on claude.ai, the only place Claude shows and spends
   its free resets; sign in there as that account.
 
@@ -38,6 +40,33 @@ Codex account's when it has 30% or less left and isn't used up. With several acc
 carries the account's initial. When the account in use reaches 90% and
 auto-switch has nowhere to go, ZipSwap sends one notification for that limit
 window.
+
+## When Claude auto-switch can't read usage
+
+claude-swap's engine switches when the active account crosses the line set in
+Settings. It decides from Anthropic's usage API, which allows about 30 reads an
+hour per account. Within 15 points of the line the engine reads every minute,
+so a long session can run out of reads before the line; while that 429 lasts,
+the engine keeps trusting the last reading and reports "below the line" even
+after Claude Code has stopped. ZipSwap adds its own checks on every refresh:
+
+- **Stopped readings.** When the active reading is more than six minutes old
+  and within 15 points of the line, ZipSwap switches to the account with the
+  most room. An account it leaves isn't chosen again until a newer reading
+  shows room.
+- **Claude Code's own report.** With **Switch When Claude Code Hits a Limit**
+  on (Settings, needs the Claude integration), a usage-limit stop in a session
+  on the default login switches at once. Sessions with their own
+  `CLAUDE_CONFIG_DIR` are ignored, and so is a report contradicted by a fresh
+  reading with room.
+- **A stalled engine.** An engine that says nothing for 15 minutes is
+  restarted; one that stops after repeated failures sends a notification, and
+  an account past its line or at its limit for five minutes is still switched.
+- **Nowhere to go.** When no other account has a recent reading with room,
+  ZipSwap says so in a notification and in Settings instead of waiting silently.
+
+Settings shows the engine's last decision under the Claude switch. Codex
+auto-switch needs at least two saved Codex accounts.
 
 The design follows [OpenUsage](https://github.com/robinebers/openusage) (MIT);
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

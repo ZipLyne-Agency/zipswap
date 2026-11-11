@@ -5,6 +5,10 @@ import HandoffCore
 
 /// Everything Claude goes through the claude-swap CLI; ZipSwap never touches
 /// Claude credentials itself.
+struct ClaudeLoginChanged: LocalizedError {
+    var errorDescription: String? { "The default Claude CLI login changed. Choose Check tools or Add Current Claude Code Login to reconcile it." }
+}
+
 enum ClaudeService {
     static let tool = "claude-swap"
     static let dataDir = Shell.home.appendingPathComponent(".claude-swap-backup")
@@ -18,7 +22,11 @@ enum ClaudeService {
 
     static func list() async throws -> [Account] {
         let result = try await Shell.run(tool, ["list", "--json"], timeout: 90)
-        return try decode(result)
+        var accounts = try decode(result)
+        if let limited = rateLimitTimes() {
+            accounts = accounts.map { var account = $0; account.rateLimitedAt = limited[account.email.lowercased()]; account.rateLimitKnown = true; return account }
+        }
+        return accounts
     }
 
     static func decode(_ result: ShellResult) throws -> [Account] {
@@ -144,7 +152,10 @@ enum ClaudeService {
             fetchedAt: fetched,
             stale: current == nil && !windows.isEmpty,
             usageRetryAt: Format.date(row["usageRetryAt"]),
-            organizationID: row["organizationUuid"] as? String
+            organizationID: row["organizationUuid"] as? String,
+            usageStatus: status,
+            switchLine: JSONScalar.number(row["threshold"]),
+            usageError: row["usageError"] as? String
         )
     }
 
@@ -185,13 +196,32 @@ enum ClaudeService {
 
     static func verifyDefaultIdentity(email: String, organizationID: String? = nil) async throws {
         let status = try await Shell.run("claude", ["auth", "status"], timeout: 15)
-        guard status.status == 0,
-              let root = try? JSONSerialization.jsonObject(with: status.stdout) as? [String: Any],
-              root["loggedIn"] as? Bool == true,
+        guard status.status == 0, let root = try? JSONSerialization.jsonObject(with: status.stdout) as? [String: Any] else {
+            throw ShellError.failed("Claude didn't report its login. Refresh again.")
+        }
+        // An answer naming another login (or none) is certain; anything else may be transient.
+        guard root["loggedIn"] as? Bool == true,
               (root["email"] as? String)?.caseInsensitiveCompare(email) == .orderedSame,
               organizationID == nil || organizationID?.isEmpty == true || root["orgId"] as? String == organizationID else {
-            throw ShellError.failed("The default Claude CLI login changed. Choose Check tools or Add Current Claude Code Login to reconcile it.")
+            throw ClaudeLoginChanged()
         }
+    }
+
+    /// When claude-swap last met a 429 for each account (by email), from its own
+    /// usage cache. Read-only; nil when the cache can't be read, so callers can
+    /// tell "no 429" from "unknown".
+    static func rateLimitTimes(at url: URL = dataDir.appendingPathComponent("cache/usage.json")) -> [String: Date]? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? .max) <= 4_000_000,
+              let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accounts = root["accounts"] as? [String: Any] else { return nil }
+        var out: [String: Date] = [:]
+        for case let row as [String: Any] in accounts.values {
+            guard let email = (row["email"] as? String)?.lowercased(), !email.isEmpty else { continue }
+            if let at = JSONScalar.number(row["last429At"]) { out[email] = Date(timeIntervalSince1970: at) }
+        }
+        return out
     }
 
     static func rename(slot: Int, to name: String) async throws {

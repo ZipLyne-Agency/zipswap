@@ -15,7 +15,9 @@ extension AppModel {
 
     /// A success receipt is created only after identity readback in the default
     /// CLI scope. Existing Orca/terminal processes are never claimed as switched.
-    func performSwitch(_ account: Account, reason: String) async throws {
+    /// `expectingActive` aborts the switch when another switch already moved
+    /// the default login while this one waited for the engine to pause.
+    func performSwitch(_ account: Account, reason: String, expectingActive: Account? = nil) async throws {
         let token = try coordinator.begin(account.provider, accountID: account.id)
         busy.insert(account.id)
         defer {
@@ -30,7 +32,14 @@ extension AppModel {
             switch account.provider {
             case .claude:
                 guard let slot = account.slot else { throw ShellError.failed("This Claude account has no valid slot.") }
+                if let expected = expectingActive {
+                    let current = try await ClaudeService.list().first(where: \.isActive)
+                    guard current?.slot == expected.slot else {
+                        throw ShellError.failed("The default Claude login already changed. Nothing was switched.")
+                    }
+                }
                 try await ClaudeService.switchTo(slot: slot)
+                lastClaudeSwitchAt = .now
                 claude = claude.map { var value = $0; value.isActive = value.id == account.id; value.activeIdentityVerified = value.isActive; return value }
             case .codex:
                 guard let target = storedAccount(for: account) else { throw ShellError.failed("This Codex account is no longer saved.") }

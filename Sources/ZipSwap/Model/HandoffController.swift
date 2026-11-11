@@ -46,7 +46,7 @@ final class HandoffController {
             do {
                 try await HandoffIntegration.install()
                 integrationInstalled = true
-                message = "Integration installed. Restart or resume Claude Code to load it, then enable handoff here."
+                message = "Integration installed. Restart or resume Claude Code to load it."
             } catch { message = error.localizedDescription }
         }
     }

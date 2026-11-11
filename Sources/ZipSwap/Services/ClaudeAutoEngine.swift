@@ -25,6 +25,9 @@ final class ClaudeAutoEngine {
     private(set) var isRunning = false
     private(set) var status = "Off"
     private(set) var retryAt: Date?
+    /// System uptime when the running engine last printed anything. Uptime
+    /// stops during sleep, so a sleeping Mac never reads as a hung engine.
+    @ObservationIgnored private(set) var lastOutputAt: TimeInterval?
     @ObservationIgnored private var process: OwnedProcess?
     @ObservationIgnored private var retiring: OwnedProcess?
     @ObservationIgnored private var restart: Task<Void, Never>?
@@ -85,6 +88,7 @@ final class ClaudeAutoEngine {
             let lines = reader.feed(data)
             Task { @MainActor [weak self] in
                 guard let self, self.generation == token else { return }
+                self.lastOutputAt = ProcessInfo.processInfo.systemUptime
                 if reader.overflow { self.failed("Engine output exceeded its limit"); self.stopChild(); return }
                 for line in lines {
                     guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
@@ -111,7 +115,7 @@ final class ClaudeAutoEngine {
             try child.start(executable: executable, arguments: ["auto", "--json", "--threshold", String(threshold)],
                             environment: Shell.environment(), lifetime: nil, terminationGrace: 3)
             try? child.input.fileHandleForWriting.close()
-            isRunning = true; status = "Running"; retryAt = nil
+            isRunning = true; status = "Running"; retryAt = nil; lastOutputAt = ProcessInfo.processInfo.systemUptime
         } catch { process = nil; failed(error.localizedDescription) }
     }
 
@@ -131,6 +135,16 @@ final class ClaudeAutoEngine {
             guard !Task.isCancelled, let self else { return }
             self.restart = nil; self.launch()
         }
+    }
+
+    /// Replaces a running engine that has printed nothing for `after` seconds.
+    /// Counts as a failure, so a hang that repeats ends in the visible stopped state.
+    @discardableResult
+    func restartIfSilent(after limit: TimeInterval, uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard isRunning, let last = lastOutputAt, uptime - last >= limit else { return false }
+        stopChild()
+        failed("Engine stopped responding")
+        return true
     }
 
     private func persist() {

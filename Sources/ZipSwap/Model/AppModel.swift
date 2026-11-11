@@ -30,6 +30,13 @@ final class AppModel {
     var addingCodex = false
     var runtimeTools: [RuntimeTool] = []
     var claudeIdentityReady = false
+    /// The engine's most recent decision, in plain words, and when it last spoke.
+    var claudeEngineDecision: String?
+    var claudeEngineHeardAt: Date?
+    /// What the safety net last did or could not do.
+    var claudeSafetyNote: String?
+    /// Switch the moment Claude Code reports a usage limit (needs the Claude integration).
+    var limitSwitchOn = ClaudeLimitSignals.isEnabled(HandoffStore())
 
     var claudeAutoOn: Bool { didSet { save("claudeAutoOn", claudeAutoOn); applyClaudeAuto() } }
     private var claudeThresholdValue: Double = 95
@@ -83,6 +90,16 @@ final class AppModel {
     @ObservationIgnored private var pendingClaudeRefresh = false
     @ObservationIgnored var codexPoll: [String: CodexPollState] = [:]
     @ObservationIgnored var loginTask: Task<Void, Never>?
+    @ObservationIgnored var lastClaudeSwitchAt: Date?
+    @ObservationIgnored var claudeBlockedSince: (id: String, at: Date)?
+    /// Accounts the safety net left, kept out until a newer reading shows room.
+    @ObservationIgnored var claudeLeftBySafetyNet: [String: Date] = [:]
+    @ObservationIgnored var claudeNoTargetKey: String?
+    @ObservationIgnored var safetyNetRunning = false
+    @ObservationIgnored var safetyNetFailedAt: Date?
+    @ObservationIgnored var claudeRefreshFailures = 0
+    @ObservationIgnored var engineStopNotified = false
+    @ObservationIgnored var lastLimitSignal: Date = UserDefaults.standard.object(forKey: "lastClaudeLimitSignal") as? Date ?? .distantPast
 
     private init() {
         let d = UserDefaults.standard
@@ -132,9 +149,13 @@ final class AppModel {
                 guard let self else { return }
                 let running = await ClaudeService.legacyMenuBarRunning()
                 self.legacyRunning = running
+                self.checkEngineHealth()
                 self.applyClaudeAuto()
                 self.expireReadings()
             }
+        })
+        timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.checkLimitSignal() }
         })
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.engine.stop() }
@@ -190,11 +211,17 @@ final class AppModel {
             claude = fresh
             claudeError = nil
             lastClaudeRefresh = .now
-            Diagnostics.record(provider: .claude, operation: "refresh", outcome: "verified")
+            // Only the recovery is recorded: a minute-by-minute success log
+            // would push every useful event out of the 200-event history.
+            if claudeRefreshFailures > 0 { Diagnostics.record(provider: .claude, operation: "refresh", outcome: "verified") }
+            claudeRefreshFailures = 0
         } catch {
             guard coordinator.generation(.claude) == generation else { pendingClaudeRefresh = true; return }
             claudeError = error.localizedDescription
-            claudeIdentityReady = false; engine.stop()
+            claudeRefreshFailures += 1
+            // A login that is certainly different stops auto-switch at once. A slow
+            // `claude auth status` or helper call must not; three in a row does.
+            if error is ClaudeLoginChanged || claudeRefreshFailures >= 3 { claudeIdentityReady = false; engine.stop() }
             claude = claude.map { var value = $0; value.stale = true; value.activeIdentityVerified = false; return value }
             Diagnostics.record(provider: .claude, operation: "refresh", outcome: "failed")
         }
@@ -202,6 +229,7 @@ final class AppModel {
         if !coordinator.busy(.claude) { applyClaudeAuto() }
         HandoffController.shared.publishUsage()
         checkLowLimit(.claude)
+        await evaluateClaudeSafetyNet()
     }
 
     func refreshCodex() async {
@@ -373,11 +401,17 @@ final class AppModel {
 
     /// The account auto-switch would move to next: not active, not limited,
     /// not skipped, with the most room left.
+    /// Claude follows the safety net's rule, so what the panel calls "Next" is
+    /// where an emergency switch would go. Codex follows its own auto-switch rule.
     func upNext(_ provider: Provider) -> Account? {
-        let list = provider == .claude ? claude : codex
-        return list
-            .filter { !$0.isActive && $0.eligibilityReason() == nil }
-            .min { $0.tightest < $1.tightest }
+        switch provider {
+        case .claude:
+            return ClaudeSafetyNet.nextInLine(claude, line: claudeThreshold, left: claudeLeftBySafetyNet, now: .now)
+        case .codex:
+            return codex
+                .filter { !$0.isActive && $0.eligibilityReason() == nil && $0.tightest < codexThreshold - 10 }
+                .min { $0.tightest < $1.tightest }
+        }
     }
 
     var activeClaude: Account? { claude.first(where: \.isActive) }

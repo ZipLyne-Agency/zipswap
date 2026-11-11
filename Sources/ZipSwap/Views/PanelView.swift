@@ -280,8 +280,11 @@ struct PriorityList: View {
                         }
                     }
                 }
-                if !board.upNext.isEmpty {
-                    section("Up Next") { ForEach(board.upNext) { upNextRow($0) } }
+                if !board.upNext.isEmpty || !nothingReady.isEmpty {
+                    section("Up Next") {
+                        ForEach(board.upNext) { upNextRow($0) }
+                        ForEach(nothingReady) { nothingReadyRow($0) }
+                    }
                 }
                 if !board.runningOut.isEmpty || board.allClear {
                     section("Running Out") {
@@ -360,15 +363,41 @@ struct PriorityList: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Providers with auto-switch on and more than one account, but nowhere to go.
+    private var nothingReady: [Provider] {
+        Provider.allCases.filter { provider in
+            let list = provider == .claude ? model.claude : model.codex
+            let auto = provider == .claude ? model.claudeAutoOn : model.codexAutoOn
+            return auto && list.count > 1 && list.contains(where: \.isActive) && model.upNext(provider) == nil
+        }
+    }
+
+    private func nothingReadyRow(_ provider: Provider) -> some View {
+        HStack(spacing: 10) {
+            ProviderMark(provider: provider, size: 15).frame(width: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("No \(provider.title) Account Ready").font(.system(size: 13, weight: .medium))
+                Text("The others are used up, skipped or waiting for a reading")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .frame(height: 46)
+        .accessibilityElement(children: .combine)
+    }
+
     private func upNextRow(_ account: Account) -> some View {
         let tightest = account.relevantWindows.map { UsageLine(account: account, window: $0) }.max { $0.usedPct < $1.usedPct }
         let auto = account.provider == .claude ? model.claudeAutoOn : model.codexAutoOn
         let threshold = account.provider == .claude ? model.claudeThreshold : model.codexThreshold
+        let active = account.provider == .claude ? model.activeClaude : model.activeCodex
         return HStack(spacing: 10) {
             PriorityGauge(fraction: tightest.map(UsageText.fill) ?? 0, severity: Theme.severity(tightest?.usedPct ?? 0), provider: account.provider)
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.title).font(.system(size: 13, weight: .medium))
-                Text(auto ? "Auto-Switch at \(Format.pct(threshold))" : "Auto-Switch Off")
+                Text(!auto ? "Auto-Switch Off"
+                     : active.map { "Takes Over From \($0.title) at \(Format.pct(threshold))" } ?? "Auto-Switch at \(Format.pct(threshold))")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .lineLimit(1)
@@ -649,8 +678,12 @@ struct AccountBlock: View {
             Spacer(minLength: 8)
             if account.isActive {
                 PlanBadge(text: "Active", color: account.activeIdentityVerified ? Theme.positive : Theme.amber)
-            } else if !isSnapshot {
-                SwitchButton(account: account, size: .mini)
+            } else {
+                if AppModel.shared.upNext(account.provider)?.id == account.id {
+                    PlanBadge(text: "Next", color: Theme.accent)
+                        .help("Auto-switch moves here next: the most room among accounts it can use")
+                }
+                if !isSnapshot { SwitchButton(account: account, size: .mini) }
             }
             if !account.plan.isEmpty { PlanBadge(text: account.plan) }
         }

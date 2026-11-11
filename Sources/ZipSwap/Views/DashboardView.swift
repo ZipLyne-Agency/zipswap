@@ -353,7 +353,9 @@ struct OverviewDetail: View {
                     Text("Auto-Switch").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
                     Lever(title: "Claude Code", isOn: $model.claudeAutoOn, value: $model.claudeThreshold,
                           note: model.legacyRunning && model.claudeAutoOn ? "Paused While the Old Menu Bar Runs" : nil)
-                    Lever(title: "Codex", isOn: $model.codexAutoOn, value: $model.codexThreshold)
+                    ClaudeAutoStatus()
+                    Lever(title: "Codex", isOn: $model.codexAutoOn, value: $model.codexThreshold,
+                          note: model.codexAutoOn && model.codex.count < 2 ? "Needs a Second Codex Account" : nil)
                     Text("Default CLI accounts · Codex waits 5 minutes between switches")
                         .font(.system(size: 11)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
                 }
@@ -400,6 +402,43 @@ struct OverviewDetail: View {
                 }
                 .cardStyle()
             }
+    }
+}
+
+/// What Claude auto-switch last decided, and the instant switch on Claude Code's own limit report.
+struct ClaudeAutoStatus: View {
+    let model = AppModel.shared
+    let handoff = HandoffController.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Switch When Claude Code Hits a Limit").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                Spacer()
+                if handoff.integrationInstalled || model.limitSwitchOn {
+                    ToggleSwitch(isOn: Binding(get: { model.limitSwitchOn }, set: { model.setLimitSwitch($0) }),
+                                 label: "Switch When Claude Code Hits a Limit")
+                } else {
+                    Button(handoff.installing ? "Installing…" : "Install Claude Integration") { handoff.installIntegration() }
+                        .controlSize(.small)
+                        .disabled(handoff.installing)
+                }
+            }
+            if model.limitSwitchOn && !handoff.integrationInstalled {
+                Text("The Claude integration isn't installed.").font(.system(size: 11.5)).foregroundStyle(Theme.amber)
+            }
+            if let decision = model.claudeEngineDecision, model.claudeAutoOn {
+                TimelineView(.everyMinute) { _ in
+                    Text("Last check: \(decision)\(model.claudeEngineHeardAt.map { " · \(Format.ago($0, now: .now))" } ?? "")")
+                        .font(.system(size: 11.5)).foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let note = model.claudeSafetyNote {
+                Text(note).font(.system(size: 11.5)).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear { handoff.inspectIntegration() }
     }
 }
 

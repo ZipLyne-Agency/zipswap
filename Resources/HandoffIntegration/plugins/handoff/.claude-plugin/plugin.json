@@ -1,7 +1,7 @@
 {
   "name": "zipswap-handoff",
   "version": "1.0.0",
-  "description": "Warn before Claude limits and let ZipSwap prepare a Codex continuation after a rate-limit failure. Off until enabled in ZipSwap.",
+  "description": "Tells ZipSwap when Claude Code stops at its usage limit so it can switch accounts at once, and optionally prepares a Codex continuation. Each part is off until enabled in ZipSwap.",
   "author": { "name": "ZipLyne" },
   "license": "MIT",
   "homepage": "https://github.com/ZipLyne-Agency/zipswap"

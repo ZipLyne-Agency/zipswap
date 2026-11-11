@@ -59,6 +59,15 @@ struct Account: Identifiable, Hashable {
     var providerAccountID: String? = nil
     var watchedModels: [String] = []
     var organizationID: String?
+    /// claude-swap's raw usage status ("ok", "unavailable", "token_expired", ...).
+    var usageStatus: String? = nil
+    /// A per-account switch line set with `claude-swap threshold`.
+    var switchLine: Double? = nil
+    /// The last fetch failure claude-swap reports for a row without usage ("http-429", "timeout", ...).
+    var usageError: String? = nil
+    /// When claude-swap last met a 429 for this account, and whether that history could be read.
+    var rateLimitedAt: Date? = nil
+    var rateLimitKnown = false
 
     var relevantWindows: [UsageWindow] {
         guard provider == .claude else { return windows }

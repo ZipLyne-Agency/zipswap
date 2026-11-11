@@ -16,9 +16,14 @@ enum Bridge {
         let store = HandoffStore(root: root)
         switch command {
         case "hook":
-            // Disabled means no transcript access, writes, child processes, or network.
-            guard (try? store.settings().enabled) == true else { print("{}"); return }
-            let data = try FileHandle.standardInput.read(upToCount: 1_048_577) ?? Data()
+            // With both features off: no transcript access, writes, child processes, or network.
+            // Limit switching alone records only the time of a usage-limit stop.
+            let limitSwitch = ClaudeLimitSignals.isEnabled(store)
+            let handoff = (try? store.settings().enabled) == true
+            guard limitSwitch || handoff else { print("{}"); return }
+            let data = (try? FileHandle.standardInput.read(upToCount: 1_048_577)) ?? Data()
+            if limitSwitch { ClaudeLimitSignals.record(data, store: store, environment: ProcessInfo.processInfo.environment) }
+            guard handoff else { print("{}"); return }
             let projects = value("--projects").map { URL(fileURLWithPath: $0) } ?? HandoffPaths.claudeProjects
             do {
                 let result = try ClaudeHandoffHook.handle(data, store: store, projects: projects)

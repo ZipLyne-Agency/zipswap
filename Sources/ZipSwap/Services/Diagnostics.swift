@@ -15,7 +15,7 @@ enum Diagnostics {
     static let root = Shell.home.appendingPathComponent("Library/Application Support/ZipSwap/Diagnostics")
     static func record(provider: Provider, operation: String, accountID: String? = nil, outcome: String) {
         lock.lock(); defer { lock.unlock() }
-        let allowedOperations = ["refresh", "switch", "engine", "repair", "reset", "storage", "compatibility"]
+        let allowedOperations = ["refresh", "switch", "engine", "repair", "reset", "storage", "compatibility", "safety-net"]
         let allowedOutcomes = ["started", "verified", "failed", "expired", "retry", "cancelled"]
         guard allowedOperations.contains(operation), allowedOutcomes.contains(outcome) else { return }
         let url = root.appendingPathComponent("events.json")
