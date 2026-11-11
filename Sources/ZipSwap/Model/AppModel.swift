@@ -35,6 +35,8 @@ final class AppModel {
     var claudeEngineHeardAt: Date?
     /// What the safety net last did or could not do.
     var claudeSafetyNote: String?
+    /// Claude free resets as entered by hand; Anthropic doesn't report them to ZipSwap.
+    var claudeResets = ClaudeResetLedger()
     /// Switch the moment Claude Code reports a usage limit (needs the Claude integration).
     var limitSwitchOn = ClaudeLimitSignals.isEnabled(HandoffStore())
 

@@ -1,21 +1,15 @@
 import AppKit
 import SwiftUI
 
-enum PanelTab: String, CaseIterable {
-    case priority, allUsage
-    var label: String { self == .priority ? "Priority" : "All Usage" }
-}
-
 extension EnvironmentValues {
     /// Set while drawing a picture for the clipboard: controls are left out.
     @Entry var isSnapshot = false
 }
 
-/// The menu bar panel, laid out after OpenUsage: Priority shows what needs you,
-/// All Usage shows every account and limit.
+/// The menu bar panel, laid out after OpenUsage: every account and limit, the
+/// active account first and the one auto-switch moves to next beside it.
 struct PanelView: View {
     let model = AppModel.shared
-    @AppStorage("panelTab") private var tab: PanelTab = .priority
     @Environment(\.colorScheme) private var colorScheme
     @State private var contentHeight: CGFloat = 200
     @State private var copiedAt: Date?
@@ -26,14 +20,10 @@ struct PanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CapsuleSegments(options: PanelTab.allCases.map { ($0, $0.label) }, selection: $tab)
-                .padding(.horizontal, PanelMetrics.margin)
-                .padding(.top, PanelMetrics.margin)
-                .padding(.bottom, 10)
             banners
             ScrollView {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    PanelContent(tab: tab, now: context.date)
+                    AllUsageList(now: context.date)
                 }
                 .padding(.horizontal, PanelMetrics.margin)
                 .padding(.bottom, 4)
@@ -50,9 +40,9 @@ struct PanelView: View {
             .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
             footer
         }
-        .frame(width: PanelMetrics.width(for: tab, accounts: model.claude.count + model.codex.count))
+        .padding(.top, PanelMetrics.margin)
+        .frame(width: PanelMetrics.width(accounts: model.claude.count + model.codex.count))
         .background(Theme.bg)
-        .animation(.snappy(duration: 0.2), value: tab)
         .onAppear { model.panelOpened() }
     }
 
@@ -76,7 +66,7 @@ struct PanelView: View {
             nextUpdate
             Spacer(minLength: 8)
             if !(model.claude + model.codex).isEmpty {
-                RoundIconButton(systemName: "doc.on.doc", help: "Copy \(tab.label) Screenshot") { copyScreenshot() }
+                RoundIconButton(systemName: "doc.on.doc", help: "Copy Screenshot") { copyScreenshot() }
             }
             optionsMenu
         }
@@ -167,7 +157,7 @@ struct PanelView: View {
     }
 
     private func copyScreenshot() {
-        let card = ShareCard(tab: tab, now: .now).environment(\.colorScheme, colorScheme)
+        let card = ShareCard(now: .now).environment(\.colorScheme, colorScheme)
         if ShareImage.copy(card) { copiedAt = .now }
         Task {
             try? await Task.sleep(for: .seconds(2.1))
@@ -206,12 +196,11 @@ struct Banner: View {
 
 /// The picture Copy Screenshot puts on the clipboard.
 struct ShareCard: View {
-    let tab: PanelTab
     let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            PanelContent(tab: tab, now: now)
+            AllUsageList(now: now)
             HStack(spacing: 6) {
                 AppMark(size: 14)
                 Text("ZipSwap").font(.system(size: 11, weight: .semibold))
@@ -221,18 +210,9 @@ struct ShareCard: View {
             .padding(.horizontal, 4)
         }
         .padding(16)
-        .frame(width: PanelMetrics.width(for: tab, accounts: AppModel.shared.claude.count + AppModel.shared.codex.count) + 32, alignment: .topLeading)
+        .frame(width: PanelMetrics.width(accounts: AppModel.shared.claude.count + AppModel.shared.codex.count) + 32, alignment: .topLeading)
         .background(Theme.bg)
         .environment(\.isSnapshot, true)
-    }
-}
-
-struct PanelContent: View {
-    let tab: PanelTab
-    let now: Date
-
-    var body: some View {
-        if tab == .priority { PriorityList(now: now) } else { AllUsageList(now: now) }
     }
 }
 
@@ -258,268 +238,6 @@ enum UsageText {
 
     static func toggleAmount() { AppModel.shared.showsUsageLeft.toggle() }
     static func toggleReset() { AppModel.shared.showsResetClock.toggle() }
-}
-
-// MARK: Priority
-
-struct PriorityList: View {
-    let now: Date
-    let model = AppModel.shared
-    @Environment(\.isSnapshot) private var isSnapshot
-
-    var body: some View {
-        let board = PriorityBoard.make(claude: model.claude, codex: model.codex, upNext: model.upNext, now: now)
-        VStack(alignment: .leading, spacing: PanelMetrics.margin) {
-            if model.claude.isEmpty && model.codex.isEmpty {
-                emptyState
-            } else {
-                if !board.inUse.isEmpty {
-                    section("In Use") {
-                        ForEach(board.inUse) { line in
-                            limitRow(line).contextMenu { AccountMenu(account: line.account) }
-                        }
-                    }
-                }
-                if !board.upNext.isEmpty || !nothingReady.isEmpty {
-                    section("Up Next") {
-                        ForEach(board.upNext) { upNextRow($0) }
-                        ForEach(nothingReady) { nothingReadyRow($0) }
-                    }
-                }
-                if !board.runningOut.isEmpty || board.allClear {
-                    section("Running Out") {
-                        if board.runningOut.isEmpty { clearRow }
-                        ForEach(board.runningOut) { line in
-                            limitRow(line).contextMenu { AccountMenu(account: line.account) }
-                        }
-                    }
-                }
-                if !board.usedUp.isEmpty {
-                    section("Used Up") {
-                        ForEach(board.usedUp) { line in
-                            usedUpRow(line).contextMenu { AccountMenu(account: line.account) }
-                        }
-                    }
-                    .opacity(0.5)
-                }
-                if !board.notices.isEmpty {
-                    section("Needs Attention", warning: true) { ForEach(board.notices) { noticeRow($0) } }
-                }
-                if !board.waiting.isEmpty {
-                    VStack(spacing: 0) { ForEach(board.waiting) { _ in skeletonRow } }
-                }
-                errors
-            }
-        }
-    }
-
-    private func section<Content: View>(_ title: String, warning: Bool = false, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 3) {
-                SectionLabel(text: title)
-                if warning {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.amber)
-                }
-            }
-            .padding(.horizontal, 4)
-            .padding(.bottom, 2)
-            content().padding(.horizontal, 4)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func limitRow(_ line: UsageLine) -> some View {
-        let severity = Theme.severity(line.usedPct)
-        return HStack(spacing: 10) {
-            PriorityGauge(fraction: UsageText.fill(line), severity: severity, provider: line.account.provider)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(line.title).font(.system(size: 13, weight: .medium))
-                HStack(spacing: 4) {
-                    Text(line.account.title).font(.system(size: 11)).foregroundStyle(.secondary)
-                    StatusGlyph(account: line.account, now: now)
-                }
-            }
-            .lineLimit(1)
-            Spacer(minLength: 0)
-            VStack(alignment: .trailing, spacing: 1) {
-                tappable(UsageText.toggleAmount) {
-                    Text(UsageText.amount(line))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.severityText(severity))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                }
-                if let reset = UsageText.reset(line.window, now: now) {
-                    tappable(UsageText.toggleReset) {
-                        Text(reset).font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
-                    }
-                }
-            }
-            .lineLimit(1)
-            .fixedSize()
-        }
-        .frame(height: 46)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-    }
-
-    /// Providers with auto-switch on and more than one account, but nowhere to go.
-    private var nothingReady: [Provider] {
-        Provider.allCases.filter { provider in
-            let list = provider == .claude ? model.claude : model.codex
-            let auto = provider == .claude ? model.claudeAutoOn : model.codexAutoOn
-            return auto && list.count > 1 && list.contains(where: \.isActive) && model.upNext(provider) == nil
-        }
-    }
-
-    private func nothingReadyRow(_ provider: Provider) -> some View {
-        HStack(spacing: 10) {
-            ProviderMark(provider: provider, size: 15).frame(width: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("No \(provider.title) Account Ready").font(.system(size: 13, weight: .medium))
-                Text("The others are used up, skipped or waiting for a reading")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .frame(height: 46)
-        .accessibilityElement(children: .combine)
-    }
-
-    private func upNextRow(_ account: Account) -> some View {
-        let tightest = account.relevantWindows.map { UsageLine(account: account, window: $0) }.max { $0.usedPct < $1.usedPct }
-        let auto = account.provider == .claude ? model.claudeAutoOn : model.codexAutoOn
-        let threshold = account.provider == .claude ? model.claudeThreshold : model.codexThreshold
-        let active = account.provider == .claude ? model.activeClaude : model.activeCodex
-        return HStack(spacing: 10) {
-            PriorityGauge(fraction: tightest.map(UsageText.fill) ?? 0, severity: Theme.severity(tightest?.usedPct ?? 0), provider: account.provider)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account.title).font(.system(size: 13, weight: .medium))
-                Text(!auto ? "Auto-Switch Off"
-                     : active.map { "Takes Over From \($0.title) at \(Format.pct(threshold))" } ?? "Auto-Switch at \(Format.pct(threshold))")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            .lineLimit(1)
-            Spacer(minLength: 0)
-            if isSnapshot {
-                if let tightest { Text(UsageText.amount(tightest)).font(.system(size: 13, weight: .medium)).monospacedDigit() }
-            } else {
-                SwitchButton(account: account)
-            }
-        }
-        .frame(height: 46)
-        .contextMenu { AccountMenu(account: account) }
-    }
-
-    private func usedUpRow(_ line: UsageLine) -> some View {
-        HStack(spacing: 8) {
-            ProviderMark(provider: line.account.provider, size: 15).frame(width: 16)
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(line.title).font(.system(size: 13))
-                Text(line.account.title).font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            .lineLimit(1)
-            Spacer(minLength: 0)
-            if let reset = line.window.resetsAt {
-                tappable(UsageText.toggleReset) {
-                    Text(UsageText.clock ? Format.backTime(reset, now: now) : Format.short(reset, now: now))
-                        .font(.system(size: 12)).monospacedDigit().lineLimit(1).fixedSize()
-                }
-                .help("Back \(Format.resetClock(reset, now: now))")
-            }
-        }
-        .frame(height: 28)
-    }
-
-    private func noticeRow(_ account: Account) -> some View {
-        HStack(spacing: 8) {
-            ProviderMark(provider: account.provider, size: 15).frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(account.problem ?? "").font(.system(size: 11)).foregroundStyle(.secondary)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            if !isSnapshot {
-                Button("Fix") {
-                    if account.provider == .claude { model.repairClaudeLogin(account) } else { Dashboard.shared.show() }
-                }
-                .controlSize(.small)
-                .disabled(model.coordinator.busy(account.provider))
-                .help(account.provider == .claude ? "Repair Login" : "Open Account Settings")
-            }
-        }
-        .padding(.vertical, 6)
-        .contextMenu { AccountMenu(account: account) }
-    }
-
-    private var clearRow: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.positive)
-                .frame(width: PanelMetrics.gaugeSide, height: PanelMetrics.gaugeSide)
-                .background(Theme.positive.opacity(0.16), in: Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text("All Clear").font(.system(size: 13, weight: .medium))
-                Text("Nothing is running out").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .frame(height: 46)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var skeletonRow: some View {
-        HStack(spacing: 10) {
-            Circle().frame(width: PanelMetrics.gaugeSide, height: PanelMetrics.gaugeSide)
-            VStack(alignment: .leading, spacing: 6) {
-                Capsule().frame(width: 84, height: 9)
-                Capsule().frame(width: 56, height: 7)
-            }
-            Spacer(minLength: 0)
-            VStack(alignment: .trailing, spacing: 6) {
-                Capsule().frame(width: 48, height: 9)
-                Capsule().frame(width: 32, height: 7)
-            }
-        }
-        .skeleton()
-        .frame(height: 46)
-        .padding(.horizontal, 4)
-        .accessibilityElement()
-        .accessibilityLabel("Waiting for Usage")
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            AppMark(size: 32)
-            Text("No Accounts").font(.system(size: 13, weight: .semibold))
-            if let error = model.claudeError ?? model.codexError {
-                Text(error).font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            }
-            if !isSnapshot {
-                HStack(spacing: 8) {
-                    Button("Add Claude Account") { model.addClaudeAccount() }
-                    Button("Add Codex Account") { model.addCodexAccount() }
-                }
-                .controlSize(.small)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 18)
-    }
-
-    @ViewBuilder private var errors: some View {
-        ForEach([model.claudeError, model.codexError].compactMap { $0 }, id: \.self) { error in
-            Text(error).font(.system(size: 11)).foregroundStyle(Theme.amber).padding(.horizontal, 4)
-        }
-    }
-
-    @ViewBuilder
-    private func tappable<Label: View>(_ action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
-        if isSnapshot { label() } else { Button(action: action, label: label).buttonStyle(.plain) }
-    }
 }
 
 /// A spinner, warning or clock after an account's name.
@@ -559,8 +277,13 @@ struct AllUsageList: View {
             ForEach([model.claudeError, model.codexError].compactMap { $0 }, id: \.self) { error in
                 Text(error).font(.system(size: 11)).foregroundStyle(Theme.amber).padding(.horizontal, 4)
             }
+            ForEach(nothingNext, id: \.self) { provider in
+                Text("No \(provider.title) account is next: the others are used up, skipped or waiting for a reading.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.amber).padding(.horizontal, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if cards.isEmpty {
-                if model.claudeError == nil && model.codexError == nil { PriorityList(now: now) }
+                if model.claudeError == nil && model.codexError == nil { emptyState }
             } else {
                 LazyVGrid(
                     columns: Array(repeating: GridItem(.flexible(), spacing: PanelMetrics.cardGap, alignment: .top), count: columns),
@@ -572,6 +295,33 @@ struct AllUsageList: View {
         }
     }
 
+    /// Providers with auto-switch on and more than one account, but nowhere to go.
+    private var nothingNext: [Provider] {
+        Provider.allCases.filter { provider in
+            let list = provider == .claude ? model.claude : model.codex
+            let auto = provider == .claude ? model.claudeAutoOn : model.codexAutoOn
+            return auto && list.count > 1 && list.contains(where: \.isActive) && model.upNext(provider) == nil
+        }
+    }
+
+    @Environment(\.isSnapshot) private var isSnapshot
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            AppMark(size: 32)
+            Text("No Accounts").font(.system(size: 13, weight: .semibold))
+            if !isSnapshot {
+                HStack(spacing: 8) {
+                    Button("Add Claude Account") { model.addClaudeAccount() }
+                    Button("Add Codex Account") { model.addCodexAccount() }
+                }
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+    }
+
     /// Active first, then the one up next, then the rest in their usual order.
     private func ordered(_ provider: Provider) -> [Account] {
         let list = provider == .claude ? model.claude : model.codex
@@ -581,17 +331,44 @@ struct AllUsageList: View {
     }
 }
 
-/// One account in the All Usage grid: its own card, with the provider's mark.
+/// Where an account stands in the rotation, shown by its card's color.
+@MainActor
+enum AccountRole {
+    case active, next, other
+
+    static func of(_ account: Account) -> AccountRole {
+        account.isActive ? .active : AppModel.shared.upNext(account.provider)?.id == account.id ? .next : .other
+    }
+
+    /// Green for the account in use, purple for the one auto-switch moves to next.
+    /// Blue already means a normal limit, and links.
+    var color: Color? {
+        switch self {
+        case .active: return Theme.positive
+        case .next: return Theme.violet
+        case .other: return nil
+        }
+    }
+}
+
+/// One account in the All Usage grid: its own card, tinted by its role.
 struct AccountCard: View {
     let account: Account
     let now: Date
 
     var body: some View {
+        let tint = AccountRole.of(account).color
         AccountBlock(account: account, now: now)
             .padding(.horizontal, PanelMetrics.cardPadding)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .cardSurface()
+            .overlay {
+                if let tint {
+                    Theme.cardShape.fill(tint.opacity(0.07)).allowsHitTesting(false)
+                    Theme.cardShape.strokeBorder(tint.opacity(0.85), lineWidth: 1.5).allowsHitTesting(false)
+                }
+            }
     }
 }
 
@@ -667,7 +444,8 @@ struct AccountBlock: View {
             if account.provider == .codex && (!account.resetCredits.isEmpty || account.pendingResetID != nil) {
                 FreeResetsRow(account: account)
             }
-            if account.provider == .claude && account.isBlocked && !isSnapshot {
+            if account.provider == .claude
+                && (AppModel.shared.claudeResets.usable(for: account.email) > 0 || (account.isBlocked && !isSnapshot)) {
                 ClaudeResetsRow(account: account)
             }
         }
@@ -688,9 +466,10 @@ struct AccountBlock: View {
             if account.isActive {
                 PlanBadge(text: "Active", color: account.activeIdentityVerified ? Theme.positive : Theme.amber)
             } else {
-                if AppModel.shared.upNext(account.provider)?.id == account.id {
-                    PlanBadge(text: "Next", color: Theme.accent)
-                        .help("Auto-switch moves here next: the most room among accounts it can use")
+                if AccountRole.of(account) == .next {
+                    let threshold = account.provider == .claude ? AppModel.shared.claudeThreshold : AppModel.shared.codexThreshold
+                    PlanBadge(text: "Next", color: Theme.violet)
+                        .help("Auto-switch moves here when the active account reaches \(Format.pct(threshold))")
                 }
                 if !isSnapshot { SwitchButton(account: account, size: .mini) }
             }
@@ -806,17 +585,36 @@ struct FreeResetsRow: View {
 /// them on claude.ai, so this opens that page for the account's own sign-in.
 struct ClaudeResetsRow: View {
     let account: Account
+    @State private var confirming = false
+    @Environment(\.isSnapshot) private var isSnapshot
 
     var body: some View {
+        let model = AppModel.shared
+        let left = model.claudeResets.usable(for: account.email)
+        let expiry = model.claudeResets.balance(for: account.email)?.expiryDate()
         HStack(spacing: 8) {
             Text("Free Resets").lineLimit(1)
             Spacer(minLength: 0)
-            Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
-                .buttonStyle(.link)
-                .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
+            if left > 0 {
+                Text("\(left)").monospacedDigit()
+                    .help(expiry.map { "Entered by hand · usable through \(Format.dateText($0, format: "MMM d"))" } ?? "Entered by hand")
+                if !isSnapshot {
+                    Button("Use") { confirming = true }.buttonStyle(.link)
+                }
+            } else if !isSnapshot {
+                Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                    .buttonStyle(.link)
+                    .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
+            }
         }
         .font(.system(size: 12))
         .frame(height: PanelMetrics.rowHeight)
+        .confirmationDialog("Use a Free Reset on \(account.title)?", isPresented: $confirming) {
+            Button("Open claude.ai and Count It") { model.countClaudeResetUsed(account, openClaude: true) }
+            Button("Count It Only") { model.countClaudeResetUsed(account, openClaude: false) }
+        } message: {
+            Text("Claim it in Settings › Usage on claude.ai as \(account.email). \(left - 1) left after this.")
+        }
     }
 }
 

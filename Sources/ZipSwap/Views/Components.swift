@@ -74,29 +74,6 @@ struct Avatar: View {
     }
 }
 
-/// A limit as a ring around its provider's mark, as on OpenUsage's Priority tab.
-struct PriorityGauge: View {
-    let fraction: Double
-    let severity: Theme.Severity
-    let provider: Provider
-
-    private static let lineWidth: CGFloat = 3
-
-    var body: some View {
-        ZStack {
-            Circle().inset(by: Self.lineWidth / 2).stroke(Theme.track, lineWidth: Self.lineWidth)
-            Circle()
-                .inset(by: Self.lineWidth / 2)
-                .trim(from: 0, to: min(1, max(0, fraction)))
-                .stroke(Theme.severityColor(severity), style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            ProviderMark(provider: provider, size: 15)
-        }
-        .frame(width: PanelMetrics.gaugeSide, height: PanelMetrics.gaugeSide)
-        .accessibilityHidden(true)
-    }
-}
-
 /// A limit's level as a rounded bar. Drawn as shapes so a copied picture matches the panel.
 struct LevelBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -147,50 +124,6 @@ struct UsageBar: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Usage")
             .accessibilityValue(UsageText.percent(used: pct) + (left ? " left" : " used"))
-    }
-}
-
-/// Choices on a capsule track, with a thumb that slides to the chosen one.
-struct CapsuleSegments<Value: Hashable>: View {
-    let options: [(value: Value, label: String)]
-    @Binding var selection: Value
-    var height: CGFloat = 28
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var thumb
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(options, id: \.value) { segment($0.value, label: $0.label) }
-        }
-        .padding(2)
-        .frame(height: height)
-        .background(Theme.controlFill, in: Capsule())
-    }
-
-    private func segment(_ value: Value, label: String) -> some View {
-        let isSelected = selection == value
-        return Button {
-            withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.15)) { selection = value }
-        } label: {
-            Text(label)
-                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background {
-                    if isSelected {
-                        Capsule()
-                            .fill(Theme.segmentThumb)
-                            .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
-                            .overlay { Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5) }
-                            .matchedGeometryEffect(id: "thumb", in: thumb)
-                    }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

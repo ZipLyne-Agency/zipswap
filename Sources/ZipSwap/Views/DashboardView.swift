@@ -232,19 +232,7 @@ struct AccountDetail: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardStyle()
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Free Resets").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
-                            Spacer()
-                            Button("Open Claude Usage") { NSWorkspace.shared.open(ClaudeService.usagePage) }
-                                .controlSize(.small)
-                        }
-                        Text("Shown only on claude.ai. Sign in as \(account.email).")
-                            .font(.system(size: 12.5)).foregroundStyle(Theme.muted)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .cardStyle()
+                    ClaudeResetEditor(account: account)
                 }
             }
             Spacer()
@@ -402,6 +390,55 @@ struct OverviewDetail: View {
                 }
                 .cardStyle()
             }
+    }
+}
+
+/// The hand-entered count of an account's Claude free resets and their last day.
+struct ClaudeResetEditor: View {
+    let account: Account
+    let model = AppModel.shared
+
+    var body: some View {
+        let balance = model.claudeResets.balance(for: account.email)
+        let left = balance?.left ?? 0
+        let expiry = balance?.expiryDate()
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Free Resets").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+                Spacer()
+                Button("Open Claude Usage") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                    .controlSize(.small)
+            }
+            HStack {
+                Text("Left").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                Spacer()
+                Text("\(left)").font(Theme.mono(13, .semibold)).foregroundStyle(Theme.text)
+                Stepper("Free resets left", value: Binding(get: { left }, set: { model.setClaudeResets(account, left: $0, expires: expiry) }),
+                        in: 0...ClaudeResetLedger.maximum)
+                    .labelsHidden()
+            }
+            HStack {
+                Text("Usable Through").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                Spacer()
+                if let expiry {
+                    DatePicker("Usable through", selection: Binding(get: { expiry }, set: { model.setClaudeResets(account, left: left, expires: $0) }),
+                               displayedComponents: .date)
+                        .labelsHidden()
+                    Button("Clear") { model.setClaudeResets(account, left: left, expires: nil) }.controlSize(.small)
+                } else {
+                    Button("Add Date") { model.setClaudeResets(account, left: left, expires: Calendar.current.date(byAdding: .day, value: 30, to: .now)) }
+                        .controlSize(.small)
+                }
+            }
+            if let expiry, balance?.usable(at: .now) == 0, left > 0, expiry < .now {
+                Text("Expired").font(.system(size: 12)).foregroundStyle(Theme.amber)
+            }
+            Text("Enter what claude.ai shows for \(account.email).")
+                .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
     }
 }
 

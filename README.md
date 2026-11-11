@@ -16,23 +16,22 @@ that file into `~/.codex/auth.json`, and usage, resets and credits come from
 ## The panel
 
 Click the menu bar item to open the panel. It follows the system's light or
-dark appearance and has two tabs.
+dark appearance and shows every account as a card: its email, its Session,
+Weekly and watched-model limits, and its free resets.
 
-- **Priority** shows the limit closest to running out on each account in use,
-  the account auto-switch picks next (with **Switch**), other accounts' limits
-  with 30% or less left, used-up accounts and when they're back, and accounts
-  that need a repaired login (**Fix**).
-- **All Usage** shows every account's email and its Session, Weekly and watched-model limits,
-  plus Codex free resets (**Use**). **Next** marks the account auto-switch
-  moves to next, the same one listed under Up Next on Priority; when none
-  qualifies, Up Next says so. A Claude account at its limit gets a **Check**
-  link to Settings > Usage on claude.ai, the only place Claude shows and spends
-  its free resets; sign in there as that account.
+- The account in use has a green card and an **Active** badge. The account
+  auto-switch moves to next has a purple card and a **Next** badge and sits
+  beside it. When no account qualifies, a line above the cards says so.
+- Codex reports its free resets, and **Use** spends one. Claude doesn't report
+  them outside claude.ai, so enter each Claude account's count and last day in
+  Settings; **Use** counts one off and can open claude.ai to claim it. A Claude
+  account at its limit without a count gets a **Check** link to Settings >
+  Usage on claude.ai instead; sign in there as that account.
 
 Click any amount to flip between left and used, and any reset to flip between a
 countdown and a clock time; the ⋯ menu has the same two switches. **Next update
 in …** counts down to the next refresh; click it or press ⌘R to refresh now.
-The copy button puts a picture of the current tab on the clipboard. Right-click
+The copy button puts a picture of the cards on the clipboard. Right-click
 an account for Repair Login, Skip in Auto-Switch and the rest.
 
 The menu bar shows the active Claude account's tightest limit, and the active

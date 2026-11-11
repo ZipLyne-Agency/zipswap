@@ -98,7 +98,7 @@ enum Format {
         return dateText(date, format: "EEE") + " " + time
     }
 
-    private static func dateText(_ date: Date, format: String) -> String {
+    static func dateText(_ date: Date, format: String) -> String {
         guard displayable(date) else { return "Unknown" }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

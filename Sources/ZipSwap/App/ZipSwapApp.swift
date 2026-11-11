@@ -117,7 +117,7 @@ struct MenuBarLabel: View {
     private var items: [UsageLine] {
         var lines: [UsageLine] = []
         if let claude = model.activeClaude, let line = tightest(claude) { lines.append(line) }
-        // As in OpenUsage, a used-up limit never takes menu bar room; Priority lists it.
+        // As in OpenUsage, a used-up limit never takes menu bar room; its card shows it.
         if let codex = model.activeCodex, !codex.isBlocked, let line = tightest(codex), line.usedPct >= 70 { lines.append(line) }
         return lines
     }
