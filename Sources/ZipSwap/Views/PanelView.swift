@@ -644,7 +644,16 @@ struct AccountBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            caption.padding(.bottom, 4)
+            caption
+            if !account.email.isEmpty {
+                // The whole address, wrapping if it must: it tells same-named accounts apart.
+                Text(account.email)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Email \(account.email)")
+            }
+            Color.clear.frame(height: 4)
             if lines.isEmpty {
                 if account.problem == nil || account.awaitingFirstReading {
                     skeleton
@@ -672,7 +681,7 @@ struct AccountBlock: View {
                 Text(account.title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).lineLimit(1)
             } else {
                 NameField(account: account, font: .system(size: 11, weight: .semibold), color: Theme.text2)
-                    .help(account.email.isEmpty ? "Rename" : account.email)
+                    .help("Rename")
             }
             StatusGlyph(account: account, now: now)
             Spacer(minLength: 8)

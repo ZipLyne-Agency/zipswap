@@ -22,7 +22,7 @@ dark appearance and has two tabs.
   the account auto-switch picks next (with **Switch**), other accounts' limits
   with 30% or less left, used-up accounts and when they're back, and accounts
   that need a repaired login (**Fix**).
-- **All Usage** shows every account's Session, Weekly and watched-model limits,
+- **All Usage** shows every account's email and its Session, Weekly and watched-model limits,
   plus Codex free resets (**Use**). **Next** marks the account auto-switch
   moves to next, the same one listed under Up Next on Priority; when none
   qualifies, Up Next says so. A Claude account at its limit gets a **Check**
