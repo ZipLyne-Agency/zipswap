@@ -315,10 +315,27 @@ struct AllUsageList: View {
                     columns: Array(repeating: GridItem(.flexible(), spacing: PanelMetrics.cardGap, alignment: .top), count: columns),
                     alignment: .leading, spacing: PanelMetrics.cardGap
                 ) {
-                    ForEach(cards) { AccountCard(account: $0, now: now) }
+                    ForEach(cards) { AccountCard(account: $0, now: now, rows: rows($0.provider), sessionRow: hasSession($0.provider)) }
                 }
             }
         }
+    }
+
+    /// The most limit rows any card of this provider has. Every card of the
+    /// provider keeps that many, so Free Resets sits on the same line on all of them.
+    private func rows(_ provider: Provider) -> Int {
+        let list = provider == .claude ? model.claude : model.codex
+        let session = hasSession(provider)
+        return list.map { account in
+            let windows = account.relevantWindows
+            // A plan without Session still draws a "Session None" row.
+            return max(windows.count + (session && !windows.isEmpty && !windows.contains { $0.label == "5h" } ? 1 : 0), 2)
+        }.max() ?? 2
+    }
+
+    /// Whether any card of this provider has a Session limit, so the others say "None".
+    private func hasSession(_ provider: Provider) -> Bool {
+        (provider == .claude ? model.claude : model.codex).contains { $0.relevantWindows.contains { $0.label == "5h" } }
     }
 
     /// Providers with auto-switch on and more than one account, but nowhere to go.
@@ -381,10 +398,12 @@ enum AccountRole {
 struct AccountCard: View {
     let account: Account
     let now: Date
+    var rows = 0
+    var sessionRow = false
 
     var body: some View {
         let tint = AccountRole.of(account).color
-        AccountBlock(account: account, now: now)
+        AccountBlock(account: account, now: now, rows: rows, sessionRow: sessionRow)
             .padding(.horizontal, PanelMetrics.cardPadding)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -436,6 +455,10 @@ struct ProviderCard: View {
 struct AccountBlock: View {
     let account: Account
     let now: Date
+    /// Limit rows to reserve, so rows after them line up across cards.
+    var rows = 0
+    /// Other cards show Session; one without it says "None" in that row.
+    var sessionRow = false
     @Environment(\.isSnapshot) private var isSnapshot
 
     /// Weekly first on every card so the rows line up; Session, which only
@@ -471,6 +494,15 @@ struct AccountBlock: View {
             } else {
                 ForEach(lines) { MetricRow(line: $0, now: now) }
             }
+            // Blank rows for limits this plan doesn't have (no Session, say).
+            // Measured from the rows actually drawn: a skeleton is two rows.
+            let noSession = sessionRow && !lines.isEmpty && !lines.contains { $0.window.label == "5h" }
+            if noSession { NoLimitRow(title: UsageLine.title(for: "5h")) }
+            let drawn = lines.isEmpty ? (account.problem == nil || account.awaitingFirstReading ? 2 : 1) : lines.count + (noSession ? 1 : 0)
+            ForEach(0..<max(0, rows - drawn), id: \.self) { _ in Color.clear.frame(height: PanelMetrics.rowHeight) }
+            // A late-reading note above can make one card taller; pinning keeps
+            // Free Resets on its card's last line.
+            Spacer(minLength: 0)
             if account.provider == .codex && (!account.resetCredits.isEmpty || account.pendingResetID != nil) {
                 FreeResetsRow(account: account)
             }
@@ -525,6 +557,23 @@ struct AccountBlock: View {
         .skeleton()
         .accessibilityElement()
         .accessibilityLabel("Waiting for Usage")
+    }
+}
+
+/// A limit this plan doesn't have, in the row other cards use for it.
+struct NoLimitRow: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title).lineLimit(1).frame(width: PanelMetrics.labelWidth, alignment: .leading)
+            Text("None").foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12))
+        .frame(height: PanelMetrics.rowHeight)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): no limit on this plan")
     }
 }
 

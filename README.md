@@ -17,8 +17,9 @@ that file into `~/.codex/auth.json`, and usage, resets and credits come from
 
 Click the menu bar item to open the panel. It follows the system's light or
 dark appearance and shows every account as a card: its email, then its Weekly
-limit, watched-model limits and, on plans that have one, Session last, so the
-rows line up across cards, then its free resets. When a card's numbers are
+limit, watched-model limits and Session last (a plan without a Session limit
+says None there), then its free resets, which sit on the same line on every
+card of a provider. When a card's numbers are
 older than usual, an orange line under the email says why: Anthropic paused
 usage reads until a given time, or the last read is late.
 
