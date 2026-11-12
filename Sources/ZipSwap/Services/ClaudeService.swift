@@ -23,8 +23,8 @@ enum ClaudeService {
     static func list() async throws -> [Account] {
         let result = try await Shell.run(tool, ["list", "--json"], timeout: 90)
         var accounts = try decode(result)
-        if let limited = rateLimitTimes() {
-            accounts = accounts.map { var account = $0; account.rateLimitedAt = limited[account.email.lowercased()]; account.rateLimitKnown = true; return account }
+        if let cache = usageCache() {
+            accounts = accounts.map { cache.apply(to: $0) }
         }
         return accounts
     }
@@ -207,21 +207,38 @@ enum ClaudeService {
         }
     }
 
-    /// When claude-swap last met a 429 for each account (by email), from its own
-    /// usage cache. Read-only; nil when the cache can't be read, so callers can
-    /// tell "no 429" from "unknown".
-    static func rateLimitTimes(at url: URL = dataDir.appendingPathComponent("cache/usage.json")) -> [String: Date]? {
+    /// What claude-swap's usage cache knows that `list --json` leaves out.
+    struct UsageCache {
+        struct Row { var last429: Date?; var pausedUntil: Date? }
+        var rows: [String: Row]
+
+        func apply(to account: Account, now: Date = .now) -> Account {
+            var account = account
+            let row = rows[account.email.lowercased()]
+            account.rateLimitedAt = row?.last429
+            account.rateLimitKnown = true
+            account.usagePausedUntil = row?.pausedUntil.flatMap { $0 > now ? $0 : nil }
+            return account
+        }
+    }
+
+    /// Read-only; nil when the cache can't be read, so callers can tell "no 429" from "unknown".
+    static func usageCache(at url: URL = dataDir.appendingPathComponent("cache/usage.json")) -> UsageCache? {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
               values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? .max) <= 4_000_000,
               let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accounts = root["accounts"] as? [String: Any] else { return nil }
-        var out: [String: Date] = [:]
+        var out: [String: UsageCache.Row] = [:]
         for case let row as [String: Any] in accounts.values {
             guard let email = (row["email"] as? String)?.lowercased(), !email.isEmpty else { continue }
-            if let at = JSONScalar.number(row["last429At"]) { out[email] = Date(timeIntervalSince1970: at) }
+            let last429 = JSONScalar.number(row["last429At"]).map { Date(timeIntervalSince1970: $0) }
+            // claude-swap waits out a 429 until backoffUntil; that is the pause the card shows.
+            let paused = row["lastError"] as? String == "http-429"
+                ? JSONScalar.number(row["backoffUntil"]).map { Date(timeIntervalSince1970: $0) } : nil
+            out[email] = UsageCache.Row(last429: last429, pausedUntil: paused)
         }
-        return out
+        return UsageCache(rows: out)
     }
 
     static func rename(slot: Int, to name: String) async throws {

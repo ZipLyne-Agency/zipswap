@@ -132,6 +132,9 @@ final class AppModel {
         catch { codexError = error.localizedDescription; showError(error.localizedDescription) }
         codexPoll = UserDefaults.standard.data(forKey: "codexPoll.v1")
             .flatMap { try? JSONDecoder().decode([String: CodexPollState].self, from: $0) } ?? [:]
+        // Readings aren't saved, so a healthy account's next-read time from the
+        // last run would leave its card empty until then. Failure backoff stays.
+        codexPoll = codexPoll.mapValues { state in var state = state; if state.failures == 0 { state.retryAt = nil }; return state }
 
         Task {
             await checkTools()

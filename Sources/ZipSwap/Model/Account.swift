@@ -23,6 +23,14 @@ struct UsageWindow: Identifiable, Hashable {
     var isFull: Bool { pct >= 100 }
 }
 
+/// How often claude-swap reads Claude usage, with room for a missed read.
+enum ReadingCadence {
+    /// The active account: at least every 300 s plus 10% jitter, and ZipSwap refreshes every minute.
+    static let claudeActive: TimeInterval = 360
+    /// Other accounts: every 600 s; one missed read plus backoff.
+    static let claudeOther: TimeInterval = 1500
+}
+
 struct ResetCredit: Identifiable, Hashable {
     let id: String
     let title: String
@@ -68,6 +76,19 @@ struct Account: Identifiable, Hashable {
     /// When claude-swap last met a 429 for this account, and whether that history could be read.
     var rateLimitedAt: Date? = nil
     var rateLimitKnown = false
+    /// Anthropic refused this account's usage reads; claude-swap retries at this time.
+    var usagePausedUntil: Date? = nil
+
+    /// How old a reading may be before the card calls it late: claude-swap reads
+    /// the active Claude account every few minutes and the others every ten.
+    var expectedReadingAge: TimeInterval {
+        provider == .claude ? (isActive ? ReadingCadence.claudeActive : ReadingCadence.claudeOther) : 180
+    }
+
+    func readingLate(at now: Date) -> Bool {
+        guard let fetchedAt else { return false }
+        return stale || now.timeIntervalSince(fetchedAt) > expectedReadingAge
+    }
 
     var relevantWindows: [UsageWindow] {
         guard provider == .claude else { return windows }

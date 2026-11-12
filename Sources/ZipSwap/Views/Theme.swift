@@ -91,6 +91,8 @@ enum PanelMetrics {
     static let margin: CGFloat = 12
     static let cardPadding: CGFloat = 12
     static let rowHeight: CGFloat = 22
+    static let chipWidth: CGFloat = 62
+    static let chipHeight: CGFloat = 20
     static let labelWidth: CGFloat = 72
     static let valueWidth: CGFloat = 40
     static let resetWidth: CGFloat = 60

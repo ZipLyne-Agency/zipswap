@@ -127,20 +127,50 @@ struct UsageBar: View {
     }
 }
 
-/// A small grey badge, like a plan name.
-struct PlanBadge: View {
+/// The fixed-size label at the top of an account card: Active, Next, the plan.
+struct HeaderChip: View {
     let text: String
     var color: Color? = nil
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 10.5, weight: .medium))
             .foregroundStyle(color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.secondary))
             .lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 5)
-            .frame(height: 16)
-            .background((color ?? .primary).opacity(color == nil ? 0.08 : 0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 4)
+            .frame(width: PanelMetrics.chipWidth, height: PanelMetrics.chipHeight)
+            .background((color ?? .primary).opacity(color == nil ? 0.08 : 0.16),
+                        in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+/// Switch, drawn at the same size as the card's other chips.
+struct SwitchChip: View {
+    let account: Account
+    @State private var hovering = false
+
+    var body: some View {
+        let model = AppModel.shared
+        let busy = model.busy.contains(account.id) || model.coordinator.busy(account.provider)
+        let reason = account.manualSwitchReason()
+        Button { model.activate(account) } label: {
+            ZStack {
+                Text("Switch").font(.system(size: 10.5, weight: .semibold)).opacity(busy ? 0 : 1)
+                if busy { ProgressView().controlSize(.mini) }
+            }
+            .foregroundStyle(Theme.text)
+            .frame(width: PanelMetrics.chipWidth, height: PanelMetrics.chipHeight)
+            .background(Color.primary.opacity(hovering && reason == nil ? 0.2 : 0.13),
+                        in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .disabled(busy || reason != nil)
+        .opacity(reason != nil ? 0.4 : 1)
+        .help(reason ?? "Use \(account.title) for the default \(account.provider.title) CLI")
+        .accessibilityLabel("Switch to \(account.title)")
     }
 }
 
@@ -257,35 +287,6 @@ struct RoundIconButton: View {
         .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
-    }
-}
-
-/// Makes an account the default for its CLI.
-struct SwitchButton: View {
-    let account: Account
-    var prominent = false
-    var size: ControlSize = .small
-
-    var body: some View {
-        let model = AppModel.shared
-        let busy = model.busy.contains(account.id) || model.coordinator.busy(account.provider)
-        Group {
-            if prominent {
-                Button { model.activate(account) } label: { label(busy) }.buttonStyle(.borderedProminent)
-            } else {
-                Button { model.activate(account) } label: { label(busy) }.buttonStyle(.bordered)
-            }
-        }
-        .controlSize(size)
-        .disabled(busy || account.manualSwitchReason() != nil)
-        .help(account.manualSwitchReason() ?? "Use \(account.title) for the default \(account.provider.title) CLI")
-    }
-
-    private func label(_ busy: Bool) -> some View {
-        ZStack {
-            Text("Switch").opacity(busy ? 0 : 1)
-            if busy { ProgressView().controlSize(.mini) }
-        }
     }
 }
 

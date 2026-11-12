@@ -16,15 +16,19 @@ that file into `~/.codex/auth.json`, and usage, resets and credits come from
 ## The panel
 
 Click the menu bar item to open the panel. It follows the system's light or
-dark appearance and shows every account as a card: its email, its Session,
-Weekly and watched-model limits, and its free resets.
+dark appearance and shows every account as a card: its email, then its Weekly
+limit, watched-model limits and, on plans that have one, Session last, so the
+rows line up across cards, then its free resets. When a card's numbers are
+older than usual, an orange line under the email says why: Anthropic paused
+usage reads until a given time, or the last read is late.
 
 - The account in use has a green card and an **Active** badge. The account
   auto-switch moves to next has a purple card and a **Next** badge and sits
   beside it. When no account qualifies, a line above the cards says so.
 - Codex reports its free resets, and **Use** spends one. Claude doesn't report
   them outside claude.ai, so enter each Claude account's count and last day in
-  Settings; **Use** counts one off and can open claude.ai to claim it. A Claude
+  Settings; **Use** asks in the row itself, where **Count** counts one off and
+  **claude.ai** opens the page to claim it. A Claude
   account at its limit without a count gets a **Check** link to Settings >
   Usage on claude.ai instead; sign in there as that account.
 

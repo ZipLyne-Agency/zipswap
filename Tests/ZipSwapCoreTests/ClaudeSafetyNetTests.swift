@@ -190,15 +190,22 @@ final class ClaudeSafetyNetTests: XCTestCase {
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("zipswap-usage-\(UUID()).json")
         defer { try? FileManager.default.removeItem(at: cache) }
         let usage: [String: Any] = ["accounts": [
-            "4": ["email": "il@example.test", "last429At": now.addingTimeInterval(-1200).timeIntervalSince1970],
-            "6": ["email": "dev@example.test", "last429At": NSNull()]]]
+            "4": ["email": "il@example.test", "last429At": now.addingTimeInterval(-1200).timeIntervalSince1970,
+                  "lastError": "http-429", "backoffUntil": now.addingTimeInterval(900).timeIntervalSince1970],
+            "6": ["email": "dev@example.test", "last429At": NSNull(), "lastError": NSNull(), "backoffUntil": NSNull()]]]
         try JSONSerialization.data(withJSONObject: usage).write(to: cache)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cache.path)
-        let limited = try XCTUnwrap(ClaudeService.rateLimitTimes(at: cache))
-        accounts = accounts.map { var account = $0; account.rateLimitedAt = limited[account.email.lowercased()]; account.rateLimitKnown = true; return account }
+        let parsed = try XCTUnwrap(ClaudeService.usageCache(at: cache))
+        accounts = accounts.map { parsed.apply(to: $0, now: now) }
 
         XCTAssertEqual(accounts.first(where: \.isActive)?.usageStatus, "ok")
+        XCTAssertEqual(accounts.first(where: \.isActive)?.usagePausedUntil?.timeIntervalSince1970 ?? 0,
+                       now.addingTimeInterval(900).timeIntervalSince1970, accuracy: 0.01, "the card can say when reads resume")
+        XCTAssertNil(accounts.first(where: { $0.id == "claude-6" })?.usagePausedUntil)
+        XCTAssertTrue(accounts.first(where: \.isActive)?.readingLate(at: now) == true)
+        XCTAssertFalse(accounts.first(where: { $0.id == "claude-6" })?.readingLate(at: now) == true,
+                       "an alternate read 9 minutes ago is on schedule")
         XCTAssertEqual(ClaudeSafetyNet.decide(input(accounts)), .switchTo(id: "claude-6", trigger: .blind))
-        XCTAssertNil(ClaudeService.rateLimitTimes(at: cache.appendingPathExtension("missing")), "unreadable history is unknown, not empty")
+        XCTAssertNil(ClaudeService.usageCache(at: cache.appendingPathExtension("missing")), "unreadable history is unknown, not empty")
     }
 }

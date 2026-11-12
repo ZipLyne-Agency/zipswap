@@ -240,6 +240,32 @@ enum UsageText {
     static func toggleReset() { AppModel.shared.showsResetClock.toggle() }
 }
 
+/// Says when a card's numbers are older than usual: Anthropic refusing reads, or
+/// a read that hasn't come. Nothing shows while readings are on schedule.
+struct ReadingNote: View {
+    let account: Account
+    let now: Date
+
+    var body: some View {
+        if let text {
+            Text(text)
+                .font(.system(size: 11)).foregroundStyle(Theme.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var text: String? {
+        guard !account.relevantWindows.isEmpty, let fetched = account.fetchedAt else { return nil }
+        let read = "read \(Format.ago(fetched, now: now))"
+        if let paused = account.usagePausedUntil {
+            return "Anthropic paused usage reads until \(Format.clock(paused, now: now)) · \(read)"
+        }
+        guard account.readingLate(at: now) else { return nil }
+        if let retry = account.usageRetryAt, retry > now { return "Usage retry at \(Format.clock(retry, now: now)) · \(read)" }
+        return "Usage \(read)"
+    }
+}
+
 /// A spinner, warning or clock after an account's name.
 struct StatusGlyph: View {
     let account: Account
@@ -256,7 +282,7 @@ struct StatusGlyph: View {
             Image(systemName: "questionmark.circle")
                 .font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.amber)
                 .help("Selected, login not yet verified").accessibilityLabel("Login not yet verified")
-        } else if account.stale || !account.readingTrusted(at: now) {
+        } else if account.readingLate(at: now) || account.usagePausedUntil != nil {
             Image(systemName: "clock")
                 .font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary)
                 .help(account.usageFreshness(now: now)).accessibilityLabel(account.usageFreshness(now: now))
@@ -412,10 +438,13 @@ struct AccountBlock: View {
     let now: Date
     @Environment(\.isSnapshot) private var isSnapshot
 
+    /// Weekly first on every card so the rows line up; Session, which only
+    /// some plans have, comes last.
     private var lines: [UsageLine] {
         let windows = account.relevantWindows
-        let ordered = windows.filter { $0.label == "5h" } + windows.filter { $0.label == "Week" }
+        let ordered = windows.filter { $0.label == "Week" }
             + windows.filter { $0.label != "5h" && $0.label != "Week" }
+            + windows.filter { $0.label == "5h" }
         return ordered.map { UsageLine(account: account, window: $0) }
     }
 
@@ -430,6 +459,7 @@ struct AccountBlock: View {
                     .textSelection(.enabled)
                     .accessibilityLabel("Email \(account.email)")
             }
+            ReadingNote(account: account, now: now)
             Color.clear.frame(height: 4)
             if lines.isEmpty {
                 if account.problem == nil || account.awaitingFirstReading {
@@ -463,19 +493,21 @@ struct AccountBlock: View {
             }
             StatusGlyph(account: account, now: now)
             Spacer(minLength: 8)
+            // Every chip has the same size, so the columns line up across cards.
             if account.isActive {
-                PlanBadge(text: "Active", color: account.activeIdentityVerified ? Theme.positive : Theme.amber)
+                HeaderChip(text: "Active", color: account.activeIdentityVerified ? Theme.positive : Theme.amber)
+                    .help(account.activeIdentityVerified ? "The default \(account.provider.title) login" : "Selected, login not yet verified")
             } else {
                 if AccountRole.of(account) == .next {
                     let threshold = account.provider == .claude ? AppModel.shared.claudeThreshold : AppModel.shared.codexThreshold
-                    PlanBadge(text: "Next", color: Theme.violet)
+                    HeaderChip(text: "Next", color: Theme.violet)
                         .help("Auto-switch moves here when the active account reaches \(Format.pct(threshold))")
                 }
-                if !isSnapshot { SwitchButton(account: account, size: .mini) }
+                if !isSnapshot { SwitchChip(account: account) }
             }
-            if !account.plan.isEmpty { PlanBadge(text: account.plan) }
+            if !account.plan.isEmpty { HeaderChip(text: account.plan).help(account.plan) }
         }
-        .frame(height: 20)
+        .frame(height: PanelMetrics.chipHeight)
     }
 
     private var skeleton: some View {
@@ -553,6 +585,8 @@ struct MetricRow: View {
     }
 }
 
+/// Confirmations stay inside the row: a dialog or sheet would take focus from
+/// the menu bar panel, which closes it before the choice registers.
 struct FreeResetsRow: View {
     let account: Account
     @State private var confirming = false
@@ -561,22 +595,30 @@ struct FreeResetsRow: View {
     var body: some View {
         let model = AppModel.shared
         HStack(spacing: 8) {
-            Text("Free Resets").lineLimit(1)
-            Spacer(minLength: 0)
-            Text("\(account.resetCredits.count)").monospacedDigit()
-            if !isSnapshot {
-                Button(account.pendingResetID == nil ? "Use" : "Retry") { confirming = true }
-                    .buttonStyle(.link)
-                    .disabled(model.coordinator.busy(.codex) || model.busy.contains(account.id) || !account.readingTrusted(at: .now) || account.resetProblem != nil)
-                    .help(account.resetProblem ?? account.resetCredits.compactMap(\.expiresAt).min().map { "Earliest expires \(Format.resetClock($0))" } ?? "")
+            if confirming && !isSnapshot {
+                Text(account.pendingResetID == nil ? "Reset limits now?" : "Retry the same reset?").lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Cancel") { confirming = false }.buttonStyle(.link).foregroundStyle(.secondary)
+                Button(account.pendingResetID == nil ? "Reset" : "Retry") { confirming = false; model.useResetCredit(account) }
+                    .buttonStyle(.link).fontWeight(.semibold)
+            } else {
+                Text("Free Resets").lineLimit(1)
+                Spacer(minLength: 0)
+                Text("\(account.resetCredits.count)").monospacedDigit()
+                if !isSnapshot {
+                    Button(account.pendingResetID == nil ? "Use" : "Retry") { confirming = true }
+                        .buttonStyle(.link)
+                        .disabled(model.coordinator.busy(.codex) || model.busy.contains(account.id) || !account.readingTrusted(at: .now) || account.resetProblem != nil)
+                        .help(account.resetProblem ?? account.resetCredits.compactMap(\.expiresAt).min().map { "Earliest expires \(Format.resetClock($0))" } ?? "")
+                }
             }
         }
         .font(.system(size: 12))
         .frame(height: PanelMetrics.rowHeight)
-        .confirmationDialog("Use a Free Reset on \(account.title)?", isPresented: $confirming) {
-            Button("Reset Limits Now") { model.useResetCredit(account) }
-        } message: {
-            Text(account.pendingResetID == nil ? "This spends one of \(account.resetCredits.count) free Codex resets and clears the current limits." : "This retries the previous reset using the same credit and operation ID.")
+        .task(id: confirming) {
+            guard confirming else { return }
+            try? await Task.sleep(for: .seconds(10))
+            confirming = false
         }
     }
 }
@@ -593,27 +635,39 @@ struct ClaudeResetsRow: View {
         let left = model.claudeResets.usable(for: account.email)
         let expiry = model.claudeResets.balance(for: account.email)?.expiryDate()
         HStack(spacing: 8) {
-            Text("Free Resets").lineLimit(1)
-            Spacer(minLength: 0)
-            if left > 0 {
-                Text("\(left)").monospacedDigit()
-                    .help(expiry.map { "Entered by hand · usable through \(Format.dateText($0, format: "MMM d"))" } ?? "Entered by hand")
-                if !isSnapshot {
-                    Button("Use") { confirming = true }.buttonStyle(.link)
-                }
-            } else if !isSnapshot {
-                Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+            if confirming && left > 0 && !isSnapshot {
+                Text("Count one used?").lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Cancel") { confirming = false }.buttonStyle(.link).foregroundStyle(.secondary)
+                Button("claude.ai") { NSWorkspace.shared.open(ClaudeService.usagePage) }
                     .buttonStyle(.link)
-                    .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
+                    .help("Claim it in Settings › Usage, signed in as \(account.email)")
+                Button("Count") { confirming = false; model.countClaudeResetUsed(account, openClaude: false) }
+                    .buttonStyle(.link).fontWeight(.semibold)
+                    .help("\(left - 1) left after this")
+            } else {
+                Text("Free Resets").lineLimit(1)
+                Spacer(minLength: 0)
+                if left > 0 {
+                    Text("\(left)").monospacedDigit()
+                        .help(expiry.map { "Entered by hand · usable through \(Format.dateText($0, format: "MMM d"))" } ?? "Entered by hand")
+                    if !isSnapshot {
+                        Button("Use") { confirming = true }.buttonStyle(.link)
+                    }
+                } else if !isSnapshot {
+                    Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                        .buttonStyle(.link)
+                        .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
+                }
             }
         }
         .font(.system(size: 12))
         .frame(height: PanelMetrics.rowHeight)
-        .confirmationDialog("Use a Free Reset on \(account.title)?", isPresented: $confirming) {
-            Button("Open claude.ai and Count It") { model.countClaudeResetUsed(account, openClaude: true) }
-            Button("Count It Only") { model.countClaudeResetUsed(account, openClaude: false) }
-        } message: {
-            Text("Claim it in Settings › Usage on claude.ai as \(account.email). \(left - 1) left after this.")
+        // A confirmation left open shouldn't wait for a stray click later.
+        .task(id: confirming) {
+            guard confirming else { return }
+            try? await Task.sleep(for: .seconds(15))
+            confirming = false
         }
     }
 }

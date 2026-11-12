@@ -18,11 +18,11 @@ enum ClaudeSafetyNet {
     /// claude-swap reads the active account at least every 300 s (plus 10%
     /// jitter) and ZipSwap refreshes every minute, so a reading older than six
     /// minutes means the reads are being refused.
-    static let blindAfter: TimeInterval = 360
+    static let blindAfter = ReadingCadence.claudeActive
     /// Same band claude-swap uses for its urgent polling.
     static let margin: Double = 15
     /// Alternates are read every 600 s; allow one missed read plus backoff.
-    static let candidateMaxAge: TimeInterval = 1500
+    static let candidateMaxAge = ReadingCadence.claudeOther
     /// Without claude-swap's 429 history, only a much older reading counts as blind.
     static let blindWithoutEvidenceAfter: TimeInterval = 900
     /// A fresh reading of the active account that is this young overrides a
