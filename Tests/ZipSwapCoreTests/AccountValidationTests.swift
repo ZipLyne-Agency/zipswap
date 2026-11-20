@@ -98,4 +98,36 @@ final class AccountValidationTests: XCTestCase {
         limits["rateLimitsByLimitId"] = ["broken": "invalid"]
         XCTAssertThrowsError(try CodexUsageSnapshot(limits, expectedAccountID: "fixture"))
     }
+
+    func testLoginExpiryIsReadAndNeverFailsTheList() throws {
+        let row: [String: Any] = ["number": 1, "email": "one@example.test", "active": false, "usageStatus": "ok"]
+        var dated = row; dated["loginExpiresAt"] = "2026-12-18T07:41:13Z"
+        var malformed = row; malformed["number"] = 2; malformed["email"] = "two@example.test"; malformed["loginExpiresAt"] = "nonsense"
+        var numeric = row; numeric["number"] = 3; numeric["email"] = "three@example.test"; numeric["loginExpiresAt"] = 1_797_000_000
+        var absent = row; absent["number"] = 4; absent["email"] = "four@example.test"
+        let accounts = try decode([dated, malformed, numeric, absent])
+        XCTAssertEqual(accounts.count, 4)
+        XCTAssertEqual(accounts[0].loginExpiresAt, Date(timeIntervalSince1970: 1_797_579_673))
+        XCTAssertNil(accounts[1].loginExpiresAt)
+        XCTAssertNil(accounts[2].loginExpiresAt)
+        XCTAssertNil(accounts[3].loginExpiresAt)
+        XCTAssertNil(accounts[3].signInEnd(at: .now))
+    }
+    func testSignInEndWarnsInTheLastThreeDaysAndAfterItEnds() {
+        var account = ClaudeService.parse(["number": 1, "email": "one@example.test", "usageStatus": "ok"])
+        let end = Date(timeIntervalSince1970: 1_797_579_673) // 18 Dec 2026, 09:41 Israel time
+        account.loginExpiresAt = end
+        let early = account.signInEnd(at: end.addingTimeInterval(-10 * 86400))
+        XCTAssertEqual(early?.text, "Sign-in ends Dec 18")
+        XCTAssertEqual(early?.warn, false)
+        XCTAssertEqual(early?.exact, "Sign-in ends Dec 18 09:41 Israel time")
+        let close = account.signInEnd(at: end.addingTimeInterval(-(2 * 86400 + 5 * 3600)))
+        XCTAssertEqual(close?.text, "Sign-in ends in 2d 5h")
+        XCTAssertEqual(close?.warn, true)
+        let edge = account.signInEnd(at: end.addingTimeInterval(-Account.signInWarning))
+        XCTAssertEqual(edge?.warn, true)
+        let after = account.signInEnd(at: end.addingTimeInterval(60))
+        XCTAssertEqual(after?.text, "Sign-in ended")
+        XCTAssertEqual(after?.warn, true)
+    }
 }

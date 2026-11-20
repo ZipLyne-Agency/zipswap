@@ -150,8 +150,16 @@ struct AccountDetail: View {
                         if account.isActive { Chip(text: account.activeIdentityVerified ? "Active" : "Selected · unverified", color: account.activeIdentityVerified ? Theme.mint : Theme.amber) }
                         if account.disabled { Chip(text: "Skipped by Auto-Switch", color: Theme.faint) }
                     }
-                    Text([account.provider.title, account.plan, account.email].filter { !$0.isEmpty }.joined(separator: " · "))
-                        .font(.system(size: 13)).foregroundStyle(Theme.muted)
+                    TimelineView(.everyMinute) { context in
+                        let details = Text([account.provider.title, account.plan, account.email].filter { !$0.isEmpty }.joined(separator: " · "))
+                        if let end = account.signInEnd(at: context.date) {
+                            (details + Text(" · ") + Text(end.text).foregroundStyle(end.warn ? Theme.amber : Theme.muted))
+                                .font(.system(size: 13)).foregroundStyle(Theme.muted)
+                                .help(end.exact)
+                        } else {
+                            details.font(.system(size: 13)).foregroundStyle(Theme.muted)
+                        }
+                    }
                 }
                 Spacer()
                 if !account.isActive {

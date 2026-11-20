@@ -78,6 +78,28 @@ struct Account: Identifiable, Hashable {
     var rateLimitKnown = false
     /// Anthropic refused this account's usage reads; claude-swap retries at this time.
     var usagePausedUntil: Date? = nil
+    /// When the saved Claude login itself lapses. Using it never moves this
+    /// date; only a fresh sign-in does. Nil when the login doesn't record one.
+    var loginExpiresAt: Date? = nil
+
+    /// Claude Code starts warning about three days before a login lapses.
+    static let signInWarning: TimeInterval = 3 * 86400
+
+    struct SignInEnd: Equatable {
+        let text: String
+        let warn: Bool
+        let exact: String
+    }
+
+    /// "Sign-in ends Dec 18", a countdown in the last three days, then "Sign-in ended".
+    func signInEnd(at now: Date) -> SignInEnd? {
+        guard let end = loginExpiresAt else { return nil }
+        let exact = "Sign-in ends \(Format.clock(end, now: now)) Israel time"
+        let left = end.timeIntervalSince(now)
+        if left <= 0 { return SignInEnd(text: "Sign-in ended", warn: true, exact: "Sign-in ended \(Format.clock(end, now: now)) Israel time") }
+        if left <= Account.signInWarning { return SignInEnd(text: "Sign-in ends \(Format.countdown(end, now: now))", warn: true, exact: exact) }
+        return SignInEnd(text: "Sign-in ends \(Format.dateText(end, format: "MMM d"))", warn: false, exact: exact)
+    }
 
     /// How old a reading may be before the card calls it late: claude-swap reads
     /// the active Claude account every few minutes and the others every ten.

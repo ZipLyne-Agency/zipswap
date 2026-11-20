@@ -155,7 +155,9 @@ enum ClaudeService {
             organizationID: row["organizationUuid"] as? String,
             usageStatus: status,
             switchLine: JSONScalar.number(row["threshold"]),
-            usageError: row["usageError"] as? String
+            usageError: row["usageError"] as? String,
+            // Display only: an absent or unreadable date means "unknown", never a failed list.
+            loginExpiresAt: Format.date(row["loginExpiresAt"] as? String)
         )
     }
 

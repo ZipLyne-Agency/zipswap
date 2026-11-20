@@ -475,12 +475,22 @@ struct AccountBlock: View {
         VStack(alignment: .leading, spacing: 0) {
             caption
             if !account.email.isEmpty {
-                // The whole address, wrapping if it must: it tells same-named accounts apart.
-                Text(account.email)
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .accessibilityLabel("Email \(account.email)")
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    // The whole address, wrapping if it must: it tells same-named accounts apart.
+                    Text(account.email)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityLabel("Email \(account.email)")
+                    // On the email line, so no card grows a row and the rows still line up.
+                    if !isSnapshot, let end = account.signInEnd(at: now) {
+                        Spacer(minLength: 0)
+                        Text(end.text)
+                            .font(.system(size: 11)).foregroundStyle(end.warn ? Theme.amber : Color.secondary)
+                            .monospacedDigit().lineLimit(1).fixedSize()
+                            .help(end.exact).accessibilityLabel(end.exact)
+                    }
+                }
             }
             ReadingNote(account: account, now: now)
             Color.clear.frame(height: 4)
