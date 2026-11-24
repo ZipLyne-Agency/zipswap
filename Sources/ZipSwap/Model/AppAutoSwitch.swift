@@ -51,7 +51,7 @@ extension AppModel {
                 } catch { showError(error.localizedDescription) }
             }
         case "account-quarantined":
-            notify("A Claude account needs a fresh login", body: "Select the account in ZipSwap and choose Repair login.")
+            notify("A Claude account needs a fresh login", body: "Right-click the account in ZipSwap and choose Renew Sign-In.")
         case "error", "engine-health":
             Diagnostics.record(provider: .claude, operation: "engine", outcome: "failed")
             notifyIfEngineStopped()

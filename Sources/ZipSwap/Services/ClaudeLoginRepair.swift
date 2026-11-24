@@ -4,7 +4,9 @@ import Foundation
 /// a CLI identity by itself. Login occurs in a stable account-specific profile;
 /// the previous default account is verified before capture and restored after.
 enum ClaudeLoginRepair {
-    static func repair(slot: Int, email: String) async throws {
+    /// `browser` replaces the default browser: Claude Code runs it with the
+    /// sign-in link, and `extraEnvironment` reaches it (agent renewal).
+    static func repair(slot: Int, email: String, browser: URL? = nil, extraEnvironment: [String: String] = [:]) async throws {
         let before = try await ClaudeService.list()
         guard let original = before.first(where: \.isActive), let originalSlot = original.slot,
               before.contains(where: { $0.slot == slot && $0.email.caseInsensitiveCompare(email) == .orderedSame }) else {
@@ -17,8 +19,10 @@ enum ClaudeLoginRepair {
             throw ShellError.failed("The repair profile must not be a symbolic link.")
         }
         let environment = ["CLAUDE_CONFIG_DIR": profile.path, "CLAUDE_SECURESTORAGE_CONFIG_DIR": profile.path]
-        let login = try await Shell.run("claude", ["auth", "login", "--claudeai", "--email", email], env: environment, timeout: 600)
-        guard login.status == 0 else { throw ShellError.failed("Sign-in did not finish. Choose Repair login to retry.") }
+        var loginEnvironment = environment.merging(extraEnvironment) { current, _ in current }
+        if let browser { loginEnvironment["BROWSER"] = browser.path }
+        let login = try await Shell.run("claude", ["auth", "login", "--claudeai", "--email", email], env: loginEnvironment, timeout: 600)
+        guard login.status == 0 else { throw ShellError.failed("Sign-in did not finish. Choose Renew Sign-In to retry.") }
         try Task.checkCancellation()
         let status = try await Shell.run("claude", ["auth", "status"], env: environment, timeout: 15)
         guard status.status == 0, let object = try? JSONSerialization.jsonObject(with: status.stdout) as? [String: Any],

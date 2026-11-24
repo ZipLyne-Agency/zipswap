@@ -41,8 +41,16 @@ struct ProviderMark: View {
     var size: CGFloat = 16
     var style: AnyShapeStyle = AnyShapeStyle(.secondary)
 
+    private var imageName: String {
+        switch provider {
+        case .claude: return "ClaudeMark"
+        case .codex: return "CodexMark"
+        case .gemini: return "GeminiMark"
+        }
+    }
+
     var body: some View {
-        Image(provider == .claude ? "ClaudeMark" : "CodexMark")
+        Image(imageName)
             .renderingMode(.template)
             .resizable()
             .interpolation(.high)

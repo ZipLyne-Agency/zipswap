@@ -67,7 +67,7 @@ enum ClaudeSafetyNet {
     static func line(for account: Account, global: Double) -> Double { account.switchLine ?? global }
 
     /// The single statuses under which a reading is a real (if frozen) measurement.
-    /// Login problems and an idle expired token belong to the engine and to Repair Login.
+    /// Login problems and an idle expired token belong to the engine and to Renew Sign-In.
     static func readingUsable(_ account: Account) -> Bool {
         ["ok", "unavailable"].contains(account.usageStatus ?? "ok") && !account.relevantWindows.isEmpty
     }

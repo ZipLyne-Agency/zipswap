@@ -40,7 +40,7 @@ extension AppModel {
             if account.provider == .claude { applyClaudeAuto() }
         }
         Diagnostics.record(provider: account.provider, operation: "switch", accountID: account.id, outcome: "started")
-        let fromName = (account.provider == .claude ? activeClaude : activeCodex)?.name ?? "none"
+        let fromName = activeAccount(for: account.provider)?.name ?? "none"
         do {
             if account.provider == .claude { try await engine.pause() }
             switch account.provider {
@@ -68,6 +68,8 @@ extension AppModel {
                 codexCooldownUntil = ProcessInfo.processInfo.systemUptime + 300
                 UserDefaults.standard.set(lastCodexAutoSwitch, forKey: "lastCodexVerifiedSwitch")
                 codex = codex.map { var value = $0; value.isActive = value.id == account.id; value.activeIdentityVerified = value.isActive; return value }
+            case .gemini:
+                throw ShellError.failed("Gemini accounts are read-only in ZipSwap.")
             }
             coordinator.finish(token, verified: true)
             Diagnostics.record(provider: account.provider, operation: "switch", accountID: account.id, outcome: "verified")
@@ -101,6 +103,10 @@ extension AppModel {
                     try CodexService.saveIndex(next, replacing: previous)
                     stored = next
                     if let index = codex.firstIndex(where: { $0.id == account.id }) { codex[index].name = trimmed }
+                case .gemini:
+                    guard !trimmed.isEmpty else { return }
+                    GeminiTokenStore.setCustomName(trimmed, for: account.id)
+                    if let index = gemini.firstIndex(where: { $0.id == account.id }) { gemini[index].name = trimmed }
                 }
             } catch { showError(error.localizedDescription) }
         }
@@ -147,21 +153,88 @@ extension AppModel {
         }
     }
 
-    func repairClaudeLogin(_ account: Account) {
-        guard account.provider == .claude, let slot = account.slot, loginTask == nil else { return }
+    /// Signs a saved Claude account in again, which also moves its sign-in end.
+    /// From the menu it opens the default browser. From an agent request
+    /// (`zipswap://renew-login?email=`) the link goes to the agent's status file
+    /// instead, and every step is written there for the agent to follow.
+    func repairClaudeLogin(_ account: Account, forAgent: Bool = false) {
+        guard account.provider == .claude, let slot = account.slot else { return }
+        let report: (LoginRenewal.Status) -> Void = { status in
+            guard forAgent else { return }
+            try? LoginRenewal.write(status)
+        }
+        guard loginTask == nil, !coordinator.busy(.claude) else {
+            report(LoginRenewal.status(account.email, .failed, message: "ZipSwap is busy with another sign-in or switch. Try again in a minute."))
+            return
+        }
+        report(LoginRenewal.status(account.email, .starting))
+        agentRenewalEmail = forAgent ? account.email : nil
         loginTask = Task {
-            defer { loginTask = nil }
+            defer { loginTask = nil; agentRenewalEmail = nil }
+            var linkWatch: Task<Void, Never>?
+            defer { linkWatch?.cancel() }
             do {
                 let token = try coordinator.begin(.claude, accountID: account.id)
                 busy.insert(account.id)
                 defer { busy.remove(account.id); coordinator.finish(token); applyClaudeAuto() }
                 try await engine.pause()
-                show("Finish signing in to \(account.title) in your browser")
-                try await ClaudeLoginRepair.repair(slot: slot, email: account.email)
-                show("\(account.title) login repaired")
+                var browser: URL?
+                var extra: [String: String] = [:]
+                if forAgent {
+                    guard let helper = OwnedProcess.bundleSupervisor, FileManager.default.isExecutableFile(atPath: helper.path) else {
+                        throw ShellError.failed("ZipSwap's helper is missing. Reinstall ZipSwap.")
+                    }
+                    try? FileManager.default.removeItem(at: LoginRenewal.linkFile)
+                    browser = helper
+                    extra[LoginRenewal.linkFileVariable] = LoginRenewal.linkFile.path
+                    linkWatch = Task {
+                        guard let link = try? await LoginRenewal.awaitLink() else { return }
+                        report(LoginRenewal.status(account.email, .openLink, signInURL: link))
+                    }
+                    show("An agent is renewing \(account.title)")
+                } else {
+                    show("Finish signing in to \(account.title) in your browser")
+                }
+                defer { try? FileManager.default.removeItem(at: LoginRenewal.linkFile) }
+                try await ClaudeLoginRepair.repair(slot: slot, email: account.email, browser: browser, extraEnvironment: extra)
+                linkWatch?.cancel()
                 await refreshClaude()
-            } catch is CancellationError { show("Sign-in cancelled") }
-            catch { showError(error.localizedDescription) }
+                let ends = claude.first { $0.slot == slot }?.loginExpiresAt
+                // Only a fresh sign-in moves the end date; an unchanged one means
+                // the saved login was not replaced.
+                if let before = account.loginExpiresAt, ends.map({ $0 <= before }) ?? true {
+                    throw ShellError.failed("Signed in, but the saved login still ends \(Format.clock(before)). Choose Renew Sign-In to retry.")
+                }
+                report(LoginRenewal.status(account.email, .done, signInEnds: ends))
+                show("\(account.title) signed in again")
+            } catch is CancellationError {
+                report(LoginRenewal.status(account.email, .failed, message: "Sign-in was cancelled."))
+                show("Sign-in cancelled")
+            } catch {
+                report(LoginRenewal.status(account.email, .failed, message: ContextRedaction.clean(error.localizedDescription)))
+                showError(error.localizedDescription)
+            }
+        }
+    }
+
+    /// An agent's `zipswap://renew-login?email=…&cancel=1`: stops that agent
+    /// renewal, so a sign-in it can't finish doesn't hold auto-switch for ten minutes.
+    func cancelAgentRenewal(email: String) {
+        guard let current = agentRenewalEmail, current.caseInsensitiveCompare(email) == .orderedSame else { return }
+        loginTask?.cancel()
+    }
+
+    /// An agent's `zipswap://renew-login?email=` request. Only a saved Claude
+    /// account's email is accepted.
+    func renewLoginForAgent(email: String) {
+        Task {
+            // A request can launch ZipSwap before its first account read.
+            if claude.isEmpty { await refreshClaude() }
+            guard let account = claude.first(where: { $0.email.caseInsensitiveCompare(email) == .orderedSame }) else {
+                try? LoginRenewal.write(LoginRenewal.status(email, .failed, message: "No saved Claude account has this email."))
+                return
+            }
+            repairClaudeLogin(account, forAgent: true)
         }
     }
 

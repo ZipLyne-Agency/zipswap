@@ -16,12 +16,14 @@ that file into `~/.codex/auth.json`, and usage, resets and credits come from
 ## The panel
 
 Click the menu bar item to open the panel. It follows the system's light or
-dark appearance and shows every account as a card: its email, then its Weekly
-limit, watched-model limits and Session last (a plan without a Session limit
-says None there), then its free resets, which sit on the same line on every
-card of a provider. When a card's numbers are
-older than usual, an orange line under the email says why: Anthropic paused
-usage reads until a given time, or the last read is late.
+dark appearance and shows every account as a card: its email, a status line,
+then its Weekly limit, watched-model limits and Session last (a plan without a
+Session limit says None there), then its free resets, which sit on the same line
+on every card of a provider. The status line says when the Claude sign-in ends;
+in its last three days it turns orange and offers **Renew**, which signs that
+account in again in your browser. When a card's numbers are older than usual,
+the right end of the same line says so in orange: "Paused to 19:00" when
+Anthropic paused usage reads, or "Read 12m ago" when a read is late.
 
 - The account in use has a green card and an **Active** badge. The account
   auto-switch moves to next has a purple card and a **Next** badge and sits
@@ -37,7 +39,7 @@ Click any amount to flip between left and used, and any reset to flip between a
 countdown and a clock time; the ⋯ menu has the same two switches. **Next update
 in …** counts down to the next refresh; click it or press ⌘R to refresh now.
 The copy button puts a picture of the cards on the clipboard. Right-click
-an account for Repair Login, Skip in Auto-Switch and the rest.
+an account for Renew Sign-In, Skip in Auto-Switch and the rest.
 
 The menu bar shows the active Claude account's tightest limit, and the active
 Codex account's when it has 30% or less left and isn't used up. With several accounts, the mark
@@ -193,10 +195,29 @@ The workflow reads these repository secrets: `DEVELOPER_ID_P12_BASE64`,
 to prepare a distributable release without accepted notarization and Gatekeeper
 verification. Publication still requires a release instruction.
 
+## Renewing sign-ins with an agent
+
+Each Claude login ends about four weeks after it was signed in. An agent can renew
+them for you: ask it to "renew my Claude logins" and it follows
+[`skills/z-claude-reauth`](skills/z-claude-reauth/SKILL.md).
+`scripts/renew-claude-login.sh start EMAIL` sends ZipSwap
+`zipswap://renew-login?email=EMAIL`, which runs the same renewal as the menu, except
+that Claude Code hands its sign-in link to ZipSwapBridge instead of a browser.
+The bridge writes the link to a private file. The agent requests Claude's email
+link in its browser and reads it from Outlook. It then opens the link as a normal
+background tab, where Claude approves Claude Code and returns the login to ZipSwap. ZipSwap fails
+the renewal if the saved end date did not move. A run with nobody at the keyboard
+has not yet finished: the 20 November test stopped on the email link page.
+Progress is written to
+`~/Library/Application Support/ZipSwap/ClaudeLogins/renew-status.json` (owner-only).
+Only a saved account's email is accepted, one renewal runs at a time, and
+`&cancel=1` stops the agent's own renewal. An account whose mail the agent cannot
+read (the Gmail one) stays a manual **Renew**.
+
 ## Recovery and diagnostics
 
-Select a Claude account and choose **Repair login** to sign in to that exact
-account in an isolated CLI profile. Cancel is available while sign-in is pending.
+Choose **Renew Sign-In** on a Claude account (or **Renew** on its card) to sign
+in to that exact account in an isolated CLI profile. Cancel is available while sign-in is pending.
 The current default login is reconciled afterward. A browser login alone does
 not refresh the saved CLI login.
 

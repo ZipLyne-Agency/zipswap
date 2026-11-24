@@ -11,10 +11,13 @@ final class AppModel {
 
     var claude: [Account] = []
     var codex: [Account] = []
+    var gemini: [Account] = []
     var claudeError: String?
     var codexError: String?
+    var geminiError: String?
     var claudeLoading = false
     var codexLoading = false
+    var geminiLoading = false
     var busy: Set<String> = []
     var toast: String?
     var persistentError: String?
@@ -24,9 +27,11 @@ final class AppModel {
     var flashUntil: Date?
     var lastClaudeRefresh: Date?
     var lastCodexRefresh: Date?
+    var lastGeminiRefresh: Date?
     /// When each refresh last started, success or not: the panel counts down from these.
     var claudeRefreshStarted: Date?
     var codexRefreshStarted: Date?
+    var geminiRefreshStarted: Date?
     var addingCodex = false
     var runtimeTools: [RuntimeTool] = []
     var claudeIdentityReady = false
@@ -92,6 +97,8 @@ final class AppModel {
     @ObservationIgnored private var pendingClaudeRefresh = false
     @ObservationIgnored var codexPoll: [String: CodexPollState] = [:]
     @ObservationIgnored var loginTask: Task<Void, Never>?
+    /// The account an agent renewal is signing in, so an agent can cancel only its own.
+    @ObservationIgnored var agentRenewalEmail: String?
     @ObservationIgnored var lastClaudeSwitchAt: Date?
     @ObservationIgnored var claudeBlockedSince: (id: String, at: Date)?
     /// Accounts the safety net left, kept out until a newer reading shows room.
@@ -149,6 +156,9 @@ final class AppModel {
         timers.append(Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshCodex() }
         })
+        timers.append(Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refreshGemini() }
+        })
         timers.append(Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -179,13 +189,15 @@ final class AppModel {
         Task {
             if (lastClaudeRefresh.map { Date.now.timeIntervalSince($0) > 20 } ?? true) { await refreshClaude() }
             if (lastCodexRefresh.map { Date.now.timeIntervalSince($0) > 60 } ?? true) { await refreshCodex() }
+            if (lastGeminiRefresh.map { Date.now.timeIntervalSince($0) > 60 } ?? true) { await refreshGemini() }
         }
     }
 
     func refreshAll() async {
         async let a: Void = refreshClaude()
         async let b: Void = refreshCodex()
-        _ = await (a, b)
+        async let c: Void = refreshGemini()
+        _ = await (a, b, c)
     }
 
     func refreshClaude() async {
@@ -314,11 +326,51 @@ final class AppModel {
         checkLowLimit(.codex)
     }
 
+    func refreshGemini() async {
+        guard !geminiLoading else { return }
+        geminiLoading = true
+        geminiRefreshStarted = .now
+        defer { geminiLoading = false }
+
+        let fetched = await GeminiService.fetchAll()
+        if fetched.isEmpty {
+            gemini = []
+            geminiError = nil
+            lastGeminiRefresh = .now
+            return
+        }
+
+        let previous = Dictionary(gemini.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        let merged: [Account] = fetched.map { account in
+            var reading = account
+            if account.problem != nil, let prev = previous[account.id], !prev.windows.isEmpty {
+                reading.windows = prev.windows
+                reading.fetchedAt = prev.fetchedAt
+                reading.stale = true
+            }
+            return reading
+        }
+        gemini = merged
+        geminiError = merged.contains(where: { $0.problem != nil }) ? merged.compactMap(\.problem).first : nil
+        if merged.contains(where: { $0.problem == nil }) {
+            lastGeminiRefresh = .now
+            Diagnostics.record(provider: .gemini, operation: "refresh", outcome: "verified")
+        } else {
+            Diagnostics.record(provider: .gemini, operation: "refresh", outcome: "failed")
+        }
+        checkLowLimit(.gemini)
+    }
+
     /// Warns once per limit window when the account in use is nearly out and
     /// auto-switch has nowhere to go.
     private func checkLowLimit(_ provider: Provider) {
-        let active = provider == .claude ? activeClaude : activeCodex
-        let auto = provider == .claude ? claudeAutoOn : codexAutoOn
+        let active = activeAccount(for: provider)
+        let auto: Bool
+        switch provider {
+        case .claude: auto = claudeAutoOn
+        case .codex: auto = codexAutoOn
+        case .gemini: auto = false
+        }
         guard let alert = LowLimitAlert.alert(active: active, upNext: upNext(provider), autoSwitchOn: auto) else { return }
         let key = "lowLimitAlert.\(provider.rawValue)"
         guard UserDefaults.standard.string(forKey: key) != alert.key else { return }
@@ -374,6 +426,11 @@ final class AppModel {
             if !value.readingTrusted(at: .now) { value.stale = true }
             return value
         }
+        gemini = gemini.map { value in
+            var value = value
+            if !value.readingTrusted(at: .now) { value.stale = true }
+            return value
+        }
     }
 
     func show(_ message: String) {
@@ -416,9 +473,38 @@ final class AppModel {
             return codex
                 .filter { !$0.isActive && $0.eligibilityReason() == nil && $0.tightest < codexThreshold - 10 }
                 .min { $0.tightest < $1.tightest }
+        case .gemini:
+            return nil
+        }
+    }
+
+    func accounts(for provider: Provider) -> [Account] {
+        switch provider {
+        case .claude: return claude
+        case .codex: return codex
+        case .gemini: return gemini
+        }
+    }
+
+    var allAccounts: [Account] { claude + codex + gemini }
+
+    func error(for provider: Provider) -> String? {
+        switch provider {
+        case .claude: return claudeError
+        case .codex: return codexError
+        case .gemini: return geminiError
+        }
+    }
+
+    func activeAccount(for provider: Provider) -> Account? {
+        switch provider {
+        case .claude: return activeClaude
+        case .codex: return activeCodex
+        case .gemini: return activeGemini
         }
     }
 
     var activeClaude: Account? { claude.first(where: \.isActive) }
     var activeCodex: Account? { codex.first(where: \.isActive) }
+    var activeGemini: Account? { gemini.first(where: \.isActive) }
 }

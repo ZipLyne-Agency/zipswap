@@ -66,6 +66,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    /// `zipswap://renew-login?email=…` from an agent (see LoginRenewal).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let email = LoginRenewal.email(from: url) else { continue }
+            let cancel = LoginRenewal.isCancel(url)
+            MainActor.assumeIsolated {
+                if cancel { AppModel.shared.cancelAgentRenewal(email: email) }
+                else { AppModel.shared.renewLoginForAgent(email: email) }
+            }
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Updater.shared.start()
         MainActor.assumeIsolated { AppModel.shared.start() }
@@ -119,6 +131,7 @@ struct MenuBarLabel: View {
         if let claude = model.activeClaude, let line = tightest(claude) { lines.append(line) }
         // As in OpenUsage, a used-up limit never takes menu bar room; its card shows it.
         if let codex = model.activeCodex, !codex.isBlocked, let line = tightest(codex), line.usedPct >= 70 { lines.append(line) }
+        if let gemini = model.activeGemini, !gemini.isBlocked, let line = tightest(gemini), line.usedPct >= 70 { lines.append(line) }
         return lines
     }
 
@@ -168,7 +181,7 @@ struct MenuBarLabel: View {
 
     @ViewBuilder
     private func mark(_ item: UsageLine) -> some View {
-        let siblings = (item.account.provider == .claude ? model.claude : model.codex).count
+        let siblings = model.accounts(for: item.account.provider).count
         let glyph = ProviderMark(provider: item.account.provider, size: 16, style: AnyShapeStyle(Color.black))
         if siblings > 1 {
             glyph

@@ -37,6 +37,7 @@ enum Theme {
     static let violet = Color(nsColor: .systemPurple)
     static let claudeMark = Color(nsColor: .systemOrange)
     static let codexMark = Color(nsColor: .systemBlue)
+    static let geminiMark = Color(nsColor: .systemIndigo)
 
     static let avatarHues: [Color] = [.green, .blue, .purple, .orange, .pink, .teal].map { $0 }
 
@@ -93,6 +94,8 @@ enum PanelMetrics {
     static let rowHeight: CGFloat = 22
     static let chipWidth: CGFloat = 62
     static let chipHeight: CGFloat = 20
+    /// The sign-in and reading line under each card's email.
+    static let statusHeight: CGFloat = 16
     static let labelWidth: CGFloat = 72
     static let valueWidth: CGFloat = 40
     static let resetWidth: CGFloat = 60

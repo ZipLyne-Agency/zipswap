@@ -21,7 +21,7 @@ enum Diagnostics {
         let url = root.appendingPathComponent("events.json")
         do {
             var events = try PrivateFile.readIfPresent(url).flatMap { try JSONDecoder().decode([DiagnosticEvent].self, from: $0) } ?? []
-            let id = accountID.flatMap { $0.hasPrefix("claude-") || $0.hasPrefix("codex-") ? $0 : nil }
+            let id = accountID.flatMap { $0.hasPrefix("claude-") || $0.hasPrefix("codex-") || $0.hasPrefix("gemini-") ? $0 : nil }
             events.append(DiagnosticEvent(at: .now, provider: provider, operation: operation, accountID: id, outcome: outcome))
             try PrivateFile.write(try JSONEncoder().encode(Array(events.suffix(200))), to: url)
         } catch {

@@ -23,7 +23,7 @@ struct DashboardView: View {
             Group {
                 if selection == "handoffs" {
                     HandoffView()
-                } else if let id = selection, let account = (model.claude + model.codex).first(where: { $0.id == id }) {
+                } else if let id = selection, let account = model.allAccounts.first(where: { $0.id == id }) {
                     AccountDetail(account: account)
                 } else {
                     OverviewDetail()
@@ -57,13 +57,15 @@ struct DashboardView: View {
             ScrollView {
             VStack(alignment: .leading, spacing: 4) {
             ForEach(Provider.allCases) { provider in
-                let list = provider == .claude ? model.claude : model.codex
-                SectionLabel(text: provider.title).padding(.horizontal, 10).padding(.top, 16).padding(.bottom, 4)
-                ForEach(list) { account in
-                    SidebarAccount(account: account, selected: selection == account.id) { selection = account.id }
-                }
-                if list.isEmpty {
-                    Text("No accounts yet").font(.system(size: 11.5)).foregroundStyle(Theme.faint).padding(.horizontal, 10)
+                let list = model.accounts(for: provider)
+                if !list.isEmpty || provider != .gemini {
+                    SectionLabel(text: provider.title).padding(.horizontal, 10).padding(.top, 16).padding(.bottom, 4)
+                    ForEach(list) { account in
+                        SidebarAccount(account: account, selected: selection == account.id) { selection = account.id }
+                    }
+                    if list.isEmpty {
+                        Text("No accounts yet").font(.system(size: 11.5)).foregroundStyle(Theme.faint).padding(.horizontal, 10)
+                    }
                 }
             }
             }
@@ -82,7 +84,7 @@ struct DashboardView: View {
     }
 
     private var summary: String {
-        let all = model.claude + model.codex
+        let all = model.allAccounts
         let limited = all.filter(\.isBlocked).count
         return "\(all.count) accounts" + (limited > 0 ? " · \(limited) limited" : "")
     }
@@ -162,7 +164,7 @@ struct AccountDetail: View {
                     }
                 }
                 Spacer()
-                if !account.isActive {
+                if !account.isActive && account.provider.supportsSwitching {
                     if account.isBlocked {
                         Text("Limited Until \(account.backAt.map(Format.resetClock) ?? "Reset")")
                             .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
@@ -182,15 +184,15 @@ struct AccountDetail: View {
                 }
             }
 
-            Text("Default CLI scope · Israel time").font(.system(size: 11.5)).foregroundStyle(Theme.muted)
-            if let problem = account.problem ?? (account.provider == .claude ? model.claudeError : model.codexError) {
+            Text(account.provider.supportsSwitching ? "Default CLI scope · Israel time" : "Local Antigravity login · Israel time").font(.system(size: 11.5)).foregroundStyle(Theme.muted)
+            if let problem = account.problem ?? model.error(for: account.provider) {
                 Label(problem, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.amber)
             }
 
             HStack {
                 if account.provider == .claude {
-                    Button(model.busy.contains(account.id) ? "Signing in…" : "Repair login") { model.repairClaudeLogin(account) }
+                    Button(model.busy.contains(account.id) ? "Signing in…" : "Renew sign-in") { model.repairClaudeLogin(account) }
                         .disabled(model.coordinator.busy(.claude))
                 }
                 if model.loginTask != nil { Button("Cancel sign-in") { model.cancelLogin() } }
@@ -239,7 +241,7 @@ struct AccountDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardStyle()
-                } else {
+                } else if account.provider == .claude {
                     ClaudeResetEditor(account: account)
                 }
             }
@@ -327,7 +329,9 @@ struct OverviewDetail: View {
                 }
                 ForEach(model.history.prefix(14)) { item in
                     HStack(spacing: 10) {
-                        RoundedRectangle(cornerRadius: 2).fill(item.provider == .claude ? Theme.claudeMark : Theme.codexMark).frame(width: 8, height: 8)
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(item.provider == .claude ? Theme.claudeMark : item.provider == .codex ? Theme.codexMark : Theme.geminiMark)
+                            .frame(width: 8, height: 8)
                         Text("\(item.from) → \(item.to)").font(.system(size: 12.5)).foregroundStyle(Theme.text)
                         if !item.reason.isEmpty { Text(item.reason).font(.system(size: 11)).foregroundStyle(Theme.faint) }
                         Spacer()

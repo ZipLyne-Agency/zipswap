@@ -4,9 +4,17 @@ import HandoffCore
 #endif
 
 enum Provider: String, CaseIterable, Identifiable, Codable {
-    case claude, codex
+    case claude, codex, gemini
     var id: String { rawValue }
-    var title: String { self == .claude ? "Claude Code" : "Codex" }
+    var title: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        case .gemini: return "Gemini"
+        }
+    }
+    /// Whether ZipSwap can switch the default CLI login between accounts of this provider.
+    var supportsSwitching: Bool { self != .gemini }
 }
 
 struct UsageWindow: Identifiable, Hashable {

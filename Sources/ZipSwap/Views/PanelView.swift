@@ -41,7 +41,7 @@ struct PanelView: View {
             footer
         }
         .padding(.top, PanelMetrics.margin)
-        .frame(width: PanelMetrics.width(accounts: model.claude.count + model.codex.count))
+        .frame(width: PanelMetrics.width(accounts: model.allAccounts.count))
         .background(Theme.bg)
         .onAppear { model.panelOpened() }
     }
@@ -52,7 +52,8 @@ struct PanelView: View {
                 model.persistentError = nil
             }
         }
-        if model.loginTask != nil {
+        // A renewal shows on its own card; this covers adding an account.
+        if model.loginTask != nil && !model.claude.contains(where: { model.busy.contains($0.id) }) {
             Banner(systemImage: "person.badge.key", tint: Theme.accent, text: "Waiting for Claude sign-in", action: "Cancel") {
                 model.cancelLogin()
             }
@@ -65,7 +66,7 @@ struct PanelView: View {
         HStack(spacing: 8) {
             nextUpdate
             Spacer(minLength: 8)
-            if !(model.claude + model.codex).isEmpty {
+            if !model.allAccounts.isEmpty {
                 RoundIconButton(systemName: "doc.on.doc", help: "Copy Screenshot") { copyScreenshot() }
             }
             optionsMenu
@@ -109,13 +110,14 @@ struct PanelView: View {
         .disabled(updating)
     }
 
-    private var updating: Bool { model.claudeLoading || model.codexLoading }
+    private var updating: Bool { model.claudeLoading || model.codexLoading || model.geminiLoading }
 
     private func updateText(now: Date) -> String {
         if updating { return "Updating…" }
         // Count from the last attempt: a failed refresh still schedules the next one.
         let next = [model.claudeRefreshStarted.map { $0.addingTimeInterval(60) },
-                    model.codexRefreshStarted.map { $0.addingTimeInterval(30) }]
+                    model.codexRefreshStarted.map { $0.addingTimeInterval(30) },
+                    model.geminiRefreshStarted.map { $0.addingTimeInterval(60) }]
             .compactMap { $0 }.filter { $0 > now }.min()
         guard let next else { return "Next update soon" }
         let seconds = Int(max(0, next.timeIntervalSince(now)).rounded(.up))
@@ -210,7 +212,7 @@ struct ShareCard: View {
             .padding(.horizontal, 4)
         }
         .padding(16)
-        .frame(width: PanelMetrics.width(accounts: AppModel.shared.claude.count + AppModel.shared.codex.count) + 32, alignment: .topLeading)
+        .frame(width: PanelMetrics.width(accounts: AppModel.shared.allAccounts.count) + 32, alignment: .topLeading)
         .background(Theme.bg)
         .environment(\.isSnapshot, true)
     }
@@ -240,33 +242,71 @@ enum UsageText {
     static func toggleReset() { AppModel.shared.showsResetClock.toggle() }
 }
 
-/// Says when a card's numbers are older than usual: Anthropic refusing reads, or
-/// a read that hasn't come. Nothing shows while readings are on schedule.
-struct ReadingNote: View {
+/// One line under the email on every card, so the limit rows line up: when the
+/// sign-in ends (with Renew once it is close) and, on the right, a note when the
+/// numbers are older than usual.
+struct AccountStatusLine: View {
     let account: Account
     let now: Date
+    @Environment(\.isSnapshot) private var isSnapshot
 
     var body: some View {
-        if let text {
-            Text(text)
-                .font(.system(size: 11)).foregroundStyle(Theme.amber)
-                .fixedSize(horizontal: false, vertical: true)
+        let model = AppModel.shared
+        let renewing = model.busy.contains(account.id) && model.loginTask != nil
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if renewing && !isSnapshot {
+                Text("Signing in…").foregroundStyle(.secondary).lineLimit(1)
+                Button("Cancel") { model.cancelLogin() }.buttonStyle(.link)
+            } else if !isSnapshot, let end = account.signInEnd(at: now) {
+                Text(end.text)
+                    .foregroundStyle(end.warn ? Theme.amber : Color.secondary)
+                    .monospacedDigit().lineLimit(1)
+                    .help(end.exact).accessibilityLabel(end.exact)
+                if end.warn && !isSnapshot && account.provider == .claude {
+                    Button("Renew") { model.repairClaudeLogin(account) }
+                        .buttonStyle(.link)
+                        .disabled(model.loginTask != nil || model.coordinator.busy(.claude))
+                        .help("Sign in to \(account.email) again in your browser")
+                }
+            }
+            Spacer(minLength: 8)
+            if let note = ReadingNote.of(account, now: now) {
+                Text(note.short)
+                    .foregroundStyle(Theme.amber).monospacedDigit().lineLimit(1)
+                    .help(note.full).accessibilityLabel(note.full)
+            }
         }
-    }
-
-    private var text: String? {
-        guard !account.relevantWindows.isEmpty, let fetched = account.fetchedAt else { return nil }
-        let read = "read \(Format.ago(fetched, now: now))"
-        if let paused = account.usagePausedUntil {
-            return "Anthropic paused usage reads until \(Format.clock(paused, now: now)) · \(read)"
-        }
-        guard account.readingLate(at: now) else { return nil }
-        if let retry = account.usageRetryAt, retry > now { return "Usage retry at \(Format.clock(retry, now: now)) · \(read)" }
-        return "Usage \(read)"
+        .font(.system(size: 11))
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(height: PanelMetrics.statusHeight, alignment: .center)
     }
 }
 
-/// A spinner, warning or clock after an account's name.
+/// When a card's numbers are older than usual: Anthropic refusing reads, or a
+/// read that hasn't come. Nil while readings are on schedule.
+enum ReadingNote {
+    struct Note { let short: String; let full: String }
+
+    static func of(_ account: Account, now: Date) -> Note? {
+        guard !account.relevantWindows.isEmpty, let fetched = account.fetchedAt else { return nil }
+        let ago = Format.ago(fetched, now: now)
+        if let paused = account.usagePausedUntil {
+            let until = Format.clock(paused, now: now)
+            // The card line holds only a bare time next to a sign-in countdown;
+            // the day stays in the tooltip.
+            let short = paused.timeIntervalSince(now) < 12 * 3600 ? "Paused to \(Format.hm(paused))" : "Reads paused"
+            return Note(short: short, full: "Anthropic paused usage reads until \(until) · read \(ago)")
+        }
+        guard account.readingLate(at: now) else { return nil }
+        if let retry = account.usageRetryAt, retry > now {
+            let at = Format.clock(retry, now: now)
+            return Note(short: "Read \(ago)", full: "Usage read \(ago) · retry at \(at)")
+        }
+        return Note(short: "Read \(ago)", full: "Usage read \(ago)")
+    }
+}
+
+/// A spinner or warning after an account's name.
 struct StatusGlyph: View {
     let account: Account
     let now: Date
@@ -282,10 +322,6 @@ struct StatusGlyph: View {
             Image(systemName: "questionmark.circle")
                 .font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.amber)
                 .help("Selected, login not yet verified").accessibilityLabel("Login not yet verified")
-        } else if account.readingLate(at: now) || account.usagePausedUntil != nil {
-            Image(systemName: "clock")
-                .font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary)
-                .help(account.usageFreshness(now: now)).accessibilityLabel(account.usageFreshness(now: now))
         }
     }
 }
@@ -300,7 +336,7 @@ struct AllUsageList: View {
         let cards = Provider.allCases.flatMap { ordered($0) }
         let columns = PanelMetrics.columns(accounts: cards.count)
         VStack(alignment: .leading, spacing: PanelMetrics.cardGap) {
-            ForEach([model.claudeError, model.codexError].compactMap { $0 }, id: \.self) { error in
+            ForEach([model.claudeError, model.codexError, model.geminiError].compactMap { $0 }, id: \.self) { error in
                 Text(error).font(.system(size: 11)).foregroundStyle(Theme.amber).padding(.horizontal, 4)
             }
             ForEach(nothingNext, id: \.self) { provider in
@@ -309,7 +345,7 @@ struct AllUsageList: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if cards.isEmpty {
-                if model.claudeError == nil && model.codexError == nil { emptyState }
+                if model.claudeError == nil && model.codexError == nil && model.geminiError == nil { emptyState }
             } else {
                 LazyVGrid(
                     columns: Array(repeating: GridItem(.flexible(), spacing: PanelMetrics.cardGap, alignment: .top), count: columns),
@@ -324,7 +360,7 @@ struct AllUsageList: View {
     /// The most limit rows any card of this provider has. Every card of the
     /// provider keeps that many, so Free Resets sits on the same line on all of them.
     private func rows(_ provider: Provider) -> Int {
-        let list = provider == .claude ? model.claude : model.codex
+        let list = model.accounts(for: provider)
         let session = hasSession(provider)
         return list.map { account in
             let windows = account.relevantWindows
@@ -335,13 +371,14 @@ struct AllUsageList: View {
 
     /// Whether any card of this provider has a Session limit, so the others say "None".
     private func hasSession(_ provider: Provider) -> Bool {
-        (provider == .claude ? model.claude : model.codex).contains { $0.relevantWindows.contains { $0.label == "5h" } }
+        model.accounts(for: provider).contains { $0.relevantWindows.contains { $0.label == "5h" } }
     }
 
     /// Providers with auto-switch on and more than one account, but nowhere to go.
     private var nothingNext: [Provider] {
         Provider.allCases.filter { provider in
-            let list = provider == .claude ? model.claude : model.codex
+            guard provider.supportsSwitching else { return false }
+            let list = model.accounts(for: provider)
             let auto = provider == .claude ? model.claudeAutoOn : model.codexAutoOn
             return auto && list.count > 1 && list.contains(where: \.isActive) && model.upNext(provider) == nil
         }
@@ -367,7 +404,7 @@ struct AllUsageList: View {
 
     /// Active first, then the one up next, then the rest in their usual order.
     private func ordered(_ provider: Provider) -> [Account] {
-        let list = provider == .claude ? model.claude : model.codex
+        let list = model.accounts(for: provider)
         let next = model.upNext(provider)?.id
         func rank(_ a: Account) -> Int { a.isActive ? 0 : a.id == next ? 1 : 2 }
         return list.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
@@ -475,24 +512,15 @@ struct AccountBlock: View {
         VStack(alignment: .leading, spacing: 0) {
             caption
             if !account.email.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    // The whole address, wrapping if it must: it tells same-named accounts apart.
-                    Text(account.email)
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .accessibilityLabel("Email \(account.email)")
-                    // On the email line, so no card grows a row and the rows still line up.
-                    if !isSnapshot, let end = account.signInEnd(at: now) {
-                        Spacer(minLength: 0)
-                        Text(end.text)
-                            .font(.system(size: 11)).foregroundStyle(end.warn ? Theme.amber : Color.secondary)
-                            .monospacedDigit().lineLimit(1).fixedSize()
-                            .help(end.exact).accessibilityLabel(end.exact)
-                    }
-                }
+                // The whole address on its own line: it tells same-named accounts apart.
+                Text(account.email)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(account.email)
+                    .accessibilityLabel("Email \(account.email)")
             }
-            ReadingNote(account: account, now: now)
+            AccountStatusLine(account: account, now: now)
             Color.clear.frame(height: 4)
             if lines.isEmpty {
                 if account.problem == nil || account.awaitingFirstReading {
@@ -510,8 +538,7 @@ struct AccountBlock: View {
             if noSession { NoLimitRow(title: UsageLine.title(for: "5h")) }
             let drawn = lines.isEmpty ? (account.problem == nil || account.awaitingFirstReading ? 2 : 1) : lines.count + (noSession ? 1 : 0)
             ForEach(0..<max(0, rows - drawn), id: \.self) { _ in Color.clear.frame(height: PanelMetrics.rowHeight) }
-            // A late-reading note above can make one card taller; pinning keeps
-            // Free Resets on its card's last line.
+            // Pinning keeps Free Resets on its card's last line.
             Spacer(minLength: 0)
             if account.provider == .codex && (!account.resetCredits.isEmpty || account.pendingResetID != nil) {
                 FreeResetsRow(account: account)
@@ -545,7 +572,7 @@ struct AccountBlock: View {
                     HeaderChip(text: "Next", color: Theme.violet)
                         .help("Auto-switch moves here when the active account reaches \(Format.pct(threshold))")
                 }
-                if !isSnapshot { SwitchChip(account: account) }
+                if !isSnapshot && account.provider.supportsSwitching { SwitchChip(account: account) }
             }
             if !account.plan.isEmpty { HeaderChip(text: account.plan).help(account.plan) }
         }
@@ -737,10 +764,12 @@ struct AccountMenu: View {
 
     var body: some View {
         let model = AppModel.shared
-        Button("Use for Default CLI") { model.activate(account) }
-            .disabled(account.isActive || account.manualSwitchReason() != nil || model.coordinator.busy(account.provider))
+        if account.provider.supportsSwitching {
+            Button("Use for Default CLI") { model.activate(account) }
+                .disabled(account.isActive || account.manualSwitchReason() != nil || model.coordinator.busy(account.provider))
+        }
         if account.provider == .claude {
-            Button("Repair Login") { model.repairClaudeLogin(account) }.disabled(model.coordinator.busy(.claude))
+            Button("Renew Sign-In") { model.repairClaudeLogin(account) }.disabled(model.coordinator.busy(.claude))
             Button(account.disabled ? "Include in Auto-Switch" : "Skip in Auto-Switch") { model.setInRotation(account, account.disabled) }
             Button("Check Free Resets on claude.ai") { NSWorkspace.shared.open(ClaudeService.usagePage) }
         }

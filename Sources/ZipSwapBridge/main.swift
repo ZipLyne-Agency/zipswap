@@ -10,7 +10,29 @@ enum Bridge {
         return CommandLine.arguments[index + 1]
     }
 
+    /// ZipSwap's agent renewal runs `claude auth login` with this helper as its
+    /// BROWSER: the sign-in link lands in a private file instead of a browser.
+    static func captureSignInLink() -> Bool {
+        let args = CommandLine.arguments
+        guard args.count == 2, let target = ProcessInfo.processInfo.environment["ZIPSWAP_SIGN_IN_URL_FILE"],
+              target.hasPrefix("/"), let url = URL(string: args[1]), url.scheme == "https",
+              let host = url.host?.lowercased(),
+              ["claude.ai", "claude.com"].contains(where: { host == $0 || host.hasSuffix("." + $0) }) else { return false }
+        let file = URL(fileURLWithPath: target)
+        guard file.lastPathComponent == "renew-sign-in-url",
+              (try? file.deletingLastPathComponent().resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return false }
+        umask(0o077)
+        return (try? Data((args[1] + "\n").utf8).write(to: file, options: [.atomic])) != nil
+    }
+
     static func run() throws {
+        // The supervisor that runs `claude` inherits the variable too, so only a
+        // lone https argument (how Claude Code calls BROWSER) means capture.
+        if ProcessInfo.processInfo.environment["ZIPSWAP_SIGN_IN_URL_FILE"] != nil,
+           CommandLine.arguments.count == 2, CommandLine.arguments[1].hasPrefix("https://") {
+            guard captureSignInLink() else { throw HandoffError.invalid("Not a Claude sign-in link.") }
+            return
+        }
         let command = CommandLine.arguments.dropFirst().first ?? ""
         let root = value("--root").map { URL(fileURLWithPath: $0) } ?? HandoffPaths.root
         let store = HandoffStore(root: root)
