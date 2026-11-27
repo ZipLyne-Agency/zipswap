@@ -29,9 +29,10 @@ Anthropic paused usage reads, or "Read 12m ago" when a read is late.
   auto-switch moves to next has a purple card and a **Next** badge and sits
   beside it. When no account qualifies, a line above the cards says so.
 - Codex reports its free resets, and **Use** spends one. Claude doesn't report
-  them outside claude.ai, so enter each Claude account's count and last day in
-  Settings; **Use** asks in the row itself, where **Count** counts one off and
-  **claude.ai** opens the page to claim it. A Claude
+  them outside claude.ai, so enter each Claude account's Weekly and Fable reset
+  counts and their last day in Settings; the row shows both ("1 Weekly · 2
+  Fable"). **Use** asks in the row itself, first which kind when the account has
+  both, then **Count** counts one off and **claude.ai** opens the page to claim it. A Claude
   account at its limit without a count gets a **Check** link to Settings >
   Usage on claude.ai instead; sign in there as that account.
 

@@ -413,6 +413,7 @@ struct ClaudeResetEditor: View {
     var body: some View {
         let balance = model.claudeResets.balance(for: account.email)
         let left = balance?.left ?? 0
+        let fable = balance?.fable ?? 0
         let expiry = balance?.expiryDate()
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -421,28 +422,32 @@ struct ClaudeResetEditor: View {
                 Button("Open Claude Usage") { NSWorkspace.shared.open(ClaudeService.usagePage) }
                     .controlSize(.small)
             }
-            HStack {
-                Text("Left").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
-                Spacer()
-                Text("\(left)").font(Theme.mono(13, .semibold)).foregroundStyle(Theme.text)
-                Stepper("Free resets left", value: Binding(get: { left }, set: { model.setClaudeResets(account, left: $0, expires: expiry) }),
-                        in: 0...ClaudeResetLedger.maximum)
-                    .labelsHidden()
+            ForEach(ClaudeResetKind.allCases) { kind in
+                let count = kind == .weekly ? left : fable
+                HStack {
+                    Text(kind.title).font(.system(size: 12.5)).foregroundStyle(Theme.text2)
+                    Spacer()
+                    Text("\(count)").font(Theme.mono(13, .semibold)).foregroundStyle(Theme.text)
+                    Stepper("\(kind.title) resets left", value: Binding(get: { count }, set: {
+                        model.setClaudeResets(account, left: kind == .weekly ? $0 : left, fable: kind == .fable ? $0 : fable, expires: expiry)
+                    }), in: 0...ClaudeResetLedger.maximum)
+                        .labelsHidden()
+                }
             }
             HStack {
                 Text("Usable Through").font(.system(size: 12.5)).foregroundStyle(Theme.text2)
                 Spacer()
                 if let expiry {
-                    DatePicker("Usable through", selection: Binding(get: { expiry }, set: { model.setClaudeResets(account, left: left, expires: $0) }),
+                    DatePicker("Usable through", selection: Binding(get: { expiry }, set: { model.setClaudeResets(account, left: left, fable: fable, expires: $0) }),
                                displayedComponents: .date)
                         .labelsHidden()
-                    Button("Clear") { model.setClaudeResets(account, left: left, expires: nil) }.controlSize(.small)
+                    Button("Clear") { model.setClaudeResets(account, left: left, fable: fable, expires: nil) }.controlSize(.small)
                 } else {
-                    Button("Add Date") { model.setClaudeResets(account, left: left, expires: Calendar.current.date(byAdding: .day, value: 30, to: .now)) }
+                    Button("Add Date") { model.setClaudeResets(account, left: left, fable: fable, expires: Calendar.current.date(byAdding: .day, value: 30, to: .now)) }
                         .controlSize(.small)
                 }
             }
-            if let expiry, balance?.usable(at: .now) == 0, left > 0, expiry < .now {
+            if let expiry, balance?.usable(at: .now) == 0, left + fable > 0, expiry < .now {
                 Text("Expired").font(.system(size: 12)).foregroundStyle(Theme.amber)
             }
             Text("Enter what claude.ai shows for \(account.email).")

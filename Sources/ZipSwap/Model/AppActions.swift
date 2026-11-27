@@ -3,17 +3,17 @@ import Foundation
 
 extension AppModel {
     /// Counts one Claude free reset as used, after it was claimed on claude.ai.
-    func countClaudeResetUsed(_ account: Account, openClaude: Bool) {
+    func countClaudeResetUsed(_ account: Account, kind: ClaudeResetKind, openClaude: Bool) {
         if openClaude { NSWorkspace.shared.open(ClaudeService.usagePage) }
-        guard claudeResets.use(account.email) else { return }
-        let left = claudeResets.usable(for: account.email)
-        show("\(account.title): one reset counted, \(left) left")
+        guard claudeResets.use(kind, account.email) else { return }
+        let left = claudeResets.usable(kind, for: account.email)
+        show("\(account.title): one \(kind.title) reset counted, \(left) left")
         // The cleared limits show once claude-swap reads the account again.
         Task { try? await Task.sleep(for: .seconds(90)); await refreshClaude() }
     }
 
-    func setClaudeResets(_ account: Account, left: Int, expires: Date?) {
-        claudeResets.set(account.email, left: left, expires: expires)
+    func setClaudeResets(_ account: Account, left: Int, fable: Int, expires: Date?) {
+        claudeResets.set(account.email, left: left, fable: fable, expires: expires)
     }
 
     func activate(_ account: Account) {

@@ -711,49 +711,61 @@ struct FreeResetsRow: View {
 
 /// A used-up Claude account's way to a free reset. Claude only shows and spends
 /// them on claude.ai, so this opens that page for the account's own sign-in.
+/// Weekly and Fable resets are counted apart; with both on hand, **Use** asks
+/// which one first.
 struct ClaudeResetsRow: View {
     let account: Account
-    @State private var confirming = false
+    private enum Stage: Equatable { case idle, choosing, confirming(ClaudeResetKind) }
+    @State private var stage = Stage.idle
     @Environment(\.isSnapshot) private var isSnapshot
 
     var body: some View {
         let model = AppModel.shared
-        let left = model.claudeResets.usable(for: account.email)
+        let kinds = ClaudeResetKind.allCases.filter { model.claudeResets.usable($0, for: account.email) > 0 }
         let expiry = model.claudeResets.balance(for: account.email)?.expiryDate()
         HStack(spacing: 8) {
-            if confirming && left > 0 && !isSnapshot {
-                Text("Count one used?").lineLimit(1)
-                Spacer(minLength: 0)
-                Button("Cancel") { confirming = false }.buttonStyle(.link).foregroundStyle(.secondary)
-                Button("claude.ai") { NSWorkspace.shared.open(ClaudeService.usagePage) }
-                    .buttonStyle(.link)
-                    .help("Claim it in Settings › Usage, signed in as \(account.email)")
-                Button("Count") { confirming = false; model.countClaudeResetUsed(account, openClaude: false) }
-                    .buttonStyle(.link).fontWeight(.semibold)
-                    .help("\(left - 1) left after this")
-            } else {
+            if isSnapshot || kinds.isEmpty || stage == .idle {
                 Text("Free Resets").lineLimit(1)
                 Spacer(minLength: 0)
-                if left > 0 {
-                    Text("\(left)").monospacedDigit()
+                if !kinds.isEmpty {
+                    Text(kinds.map { "\(model.claudeResets.usable($0, for: account.email)) \($0.title)" }.joined(separator: " · "))
+                        .monospacedDigit().lineLimit(1)
                         .help(expiry.map { "Entered by hand · usable through \(Format.dateText($0, format: "MMM d"))" } ?? "Entered by hand")
                     if !isSnapshot {
-                        Button("Use") { confirming = true }.buttonStyle(.link)
+                        Button("Use") { stage = kinds.count == 1 ? .confirming(kinds[0]) : .choosing }.buttonStyle(.link)
                     }
                 } else if !isSnapshot {
                     Button("Check") { NSWorkspace.shared.open(ClaudeService.usagePage) }
                         .buttonStyle(.link)
                         .help("Opens Settings › Usage on claude.ai. Sign in there as \(account.email).")
                 }
+            } else if stage == .choosing {
+                Text("Which reset?").lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Cancel") { stage = .idle }.buttonStyle(.link).foregroundStyle(.secondary)
+                ForEach(kinds) { kind in
+                    Button(kind.title) { stage = .confirming(kind) }.buttonStyle(.link).fontWeight(.semibold)
+                }
+            } else if case .confirming(let kind) = stage {
+                let left = model.claudeResets.usable(kind, for: account.email)
+                Text("Count one \(kind.title) used?").lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Cancel") { stage = .idle }.buttonStyle(.link).foregroundStyle(.secondary)
+                Button("claude.ai") { NSWorkspace.shared.open(ClaudeService.usagePage) }
+                    .buttonStyle(.link)
+                    .help("Claim it in Settings › Usage, signed in as \(account.email)")
+                Button("Count") { stage = .idle; model.countClaudeResetUsed(account, kind: kind, openClaude: false) }
+                    .buttonStyle(.link).fontWeight(.semibold)
+                    .help("\(max(left - 1, 0)) \(kind.title) left after this")
             }
         }
         .font(.system(size: 12))
         .frame(height: PanelMetrics.rowHeight)
         // A confirmation left open shouldn't wait for a stray click later.
-        .task(id: confirming) {
-            guard confirming else { return }
+        .task(id: stage) {
+            guard stage != .idle else { return }
             try? await Task.sleep(for: .seconds(15))
-            confirming = false
+            stage = .idle
         }
     }
 }
